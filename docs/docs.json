@@ -12,7 +12,7 @@
   "navbar": {
     "primary": {
       "type": "github",
-      "href": "https://github.com/ljagiello/totem"
+      "href": "https://github.com/ljagiello/totem-compass"
     }
   },
   "navigation": {
@@ -65,7 +65,7 @@
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/ljagiello/totem"
+      "github": "https://github.com/ljagiello/totem-compass"
     }
   }
 }

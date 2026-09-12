@@ -15,7 +15,7 @@ The receiver is a **u-blox** module spoken to over the **UBX** binary protocol.
 | Element | Evidence |
 | --- | --- |
 | UBX framing | `UBLOX_MSG_PREFIX`, `UBLOX_MSG_SIZE`, `calc_ubx_checksum` |
-| Position solution | `NAV-PVT` (`last_nav_pvt`, `last_nav_pvt_raw`) |
+| Position solution | `NAV-PVT` (`last_nav_pvt`, `last_nav_pvt_raw`); 92-byte payload → u-blox M8/M9/M10-class receiver |
 | Version query | `MON-VER` |
 | Ack / nak | `ACK-ACK`, `ACK-NAK` |
 | Rate control | `modify_nav_rate` |
@@ -42,18 +42,24 @@ delivered to the GNSS chip and cached in the filesystem.
 | Transfer | `AssistNow transfer completed successfully: {} chunks sent` |
 | Skip when unneeded | `A-GNSS file not needed. Location already known` |
 | Result | `Assistance used by GNSS - InfoCode: {}` / `NOT used` |
+| Phone GNSS fallback | with no on-board fix, the paired phone's location is used, chosen by hAcc (`Using Phone's GNSS location`, `is_phone_gnss_used`, `phone_h_acc`) |
 
-Assistance data is one of the payloads that can arrive over BLE/mesh
-(see [message format](/protocols/message-format)).
+Within the GNSS driver, assistance data is only ever loaded from the on-device filesystem
+(`Checking VFS for assist now files`) and streamed to the receiver in
+chunks (`Sending AssistNow chunk {}/{} ({} bytes), attempt {}`). Delivery of that data over BLE/mesh is
+covered by the [message-format subsystem](/protocols/message-format), not the GNSS driver.
 
 ## IMU fusion
 
 `imu_fusion.py` / `imu_fusion_auto.py` fuse accelerometer and gyroscope data for
 orientation and motion:
 
+- **Orientation filter** is a Madgwick AHRS with an adaptive beta gain (`madgwick`,
+  `is_adaptive_beta`, `_BETA_MIN_SCALE`).
 - **Tilt/orientation** feeds the 2D↔3D compass mode switch.
-- **Shake detection** (`_SHAKE_ACCEL_DEV`, `_shake_count`, `_shake_start_ms`) is a user
-  gesture (e.g. shake to trigger an action or recalibrate).
+- **Shake detection** (`_SHAKE_ACCEL_DEV`, `_shake_count`, `_shake_start_ms`) triggers a
+  manual magnetometer bias reset (`Manual bias reset triggered via shake pattern`,
+  `is_shake_reset`).
 - Accel deviation bounds gate magnetometer calibration (`_CAL3D_MAX_ACCEL_DEV`).
 
 ## Magnetic compass & calibration
@@ -70,15 +76,15 @@ declination.
 | Quality metric | `gap_xy={:.1f}uT` (residual field gap in microtesla) |
 | Persistence | `2D bias restored from config | age={}s | cals={}` |
 | Finish / fail | `_finish_calibration`, `calibration failed`, `_last_calibrated` |
-| Passive calibration | the "Vibe Mode" / `new_vibe.py` collects samples during normal motion |
 
 The 2D→3D "bias handoff" upgrades from a flat-plane heading to a full 3D solution once
 enough motion is seen: `Bias handoff 2D->3D ({}) | gap_xy={:.1f}uT | 2D age={}s`.
 
 ### Declination (World Magnetic Model)
 
-`mag_wmm_data.py` embeds the **World Magnetic Model** so the device converts magnetic
-heading to true heading based on location, refreshed periodically:
+`mag_wmm_data.py` embeds the **World Magnetic Model** — specifically **WMM 2025** (valid
+2025–2030; `WMM_2025`) — so the device converts magnetic heading to true heading based on
+location, refreshed periodically:
 
 ```text
 Declination check unnecessary. Last check was {} sec ago and {}m away
@@ -86,6 +92,20 @@ Declination check unnecessary. Last check was {} sec ago and {}m away
 
 `task_mag_declination.py` recomputes declination only when the device has moved far
 enough or enough time has passed — a power optimization.
+
+The embedded WGS84 axes (`6378.137` / `6356.7523142` km) and the `6371.2` km geomagnetic
+reference radius — all present as IEEE-754 doubles in the binary — confirm a genuine
+spherical-harmonic declination computation rather than a lookup table.
+
+## Heading output
+
+The compass surface the UI consumes:
+
+| Output | Evidence |
+| --- | --- |
+| Tilt-compensated heading | `heading_tilt_compensated`, `heading_tilt_compensated_deg` (degrees) |
+| Motion heading | `get_heading_mot` — heading-of-motion from the NAV-PVT `headMot` field; `get_azimuth`, `avg_azimuth`, `peer_azimuth` |
+| Compass lock | `is_compass_lock`, `toggle_compass_lock`; logs `Compasss Lock Enabled`, `Turning ON compass lock` / `Turning OFF compass lock` |
 
 ## Navigation logging
 
@@ -98,7 +118,18 @@ enough or enough time has passed — a power optimization.
 | `demigod_gen_add_nav_log_rule` | push a logging rule via [demi-god](/protocols/demigod) |
 | `cloud_nav_peer` | upload nav data to the cloud |
 
-## Auto-reset
+## Receiver lifecycle & auto-reset
 
-The GNSS subsystem can self-heal: `Auto-Reset GNSS`, `Cannot communicate with GNSS
-module` — if the receiver stops responding it is power-cycled/reinitialized.
+The GNSS subsystem manages the receiver end-to-end and can self-heal:
+
+| Concept | Evidence |
+| --- | --- |
+| Baud auto-detection | `Auto-detecting correct baud...`, `GNSS baud rate identified: {}` |
+| RAM configuration | `CFG-VALSET` / `CFG-MSGOUT` frames enable NAV-PVT output on UART1 (key `0x20910007`, decoded per u-blox spec as `CFG-MSGOUT-UBX_NAV_PVT_UART1`) |
+| Start modes | `CFG-RST` drives cold / warm / hot start (`GNSS Cold Start`, `GNSS Warm Start`, `GNSS Hot Start`) |
+| BBR persistence | `Saving GNSS config to BBR for faster reboots`; hot/cold start state cached in `hotcold.bin` |
+| Auto-reset | `Auto-Reset GNSS`, `Cannot communicate with GNSS module` — an unresponsive receiver is power-cycled/reinitialized |
+
+The embedded config frames all begin `B5 62` and their trailing checksum bytes verify, so
+the frame contents are confirmed; the CFG-MSGOUT key→message-name mapping is inferred from
+the u-blox protocol spec.

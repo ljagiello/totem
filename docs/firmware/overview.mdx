@@ -6,19 +6,27 @@ description: "The ESP32 application image: header, segments, footer, and build m
 ## Image format
 
 `firmware_v5.0.2.bin` is a standard **ESP-IDF application image** (`esp_image_header_t`),
-not a raw binary. It begins with the magic byte `0xE9` and is loaded by the second-stage
-bootloader into the OTA app partition.
+not a raw binary. By the ESP-IDF format it begins with the magic byte `0xE9` and is loaded
+by the second-stage bootloader into the OTA app partition.
 
 ```text
 Offset  Bytes            Meaning
-0x00    E9               magic
+0x00    E9               magic (ESP-IDF image)
 0x01    07               segment count = 7
 0x02    02               SPI mode = DIO
-0x03    20               flash size (4 MB) / freq (40 MHz)
+0x03    20               flash size 4 MB / freq 40 MHz
 0x04    44 11 08 40      entry point = 0x40081144
 0x08..  extended header  chip_id = 0 (ESP32), hash appended
 0x20    32 54 CD AB      esp_app_desc_t magic (0xABCD5432)
 ```
+
+<Note>
+Every header field above is read directly from the image file with `esptool image-info`
+(magic `0xE9`, 7 segments, entry `0x40081144`, DIO / 4 MB / 40 MHz, `chip_id` 0). The
+independent re-analysis from the carved segments corroborates the segment count, entry
+point, and the `esp_app_desc_t` at `0x20`; the SPI/flash bytes also match the
+`ESP32_GENERIC-OTA` board default.
+</Note>
 
 ## Build metadata (`esp_app_desc_t`)
 
@@ -27,11 +35,14 @@ The application descriptor sits at the start of the first mapped segment.
 | Field | Value | Notes |
 | --- | --- | --- |
 | `magic_word` | `0xABCD5432` | ESP-IDF app descriptor |
-| `project_name` | *(blank)* | intentionally not set at build time |
-| `version` | *(blank)* | version tracking is done server-side, not in the descriptor |
+| `project_name` | *(blank)* | not set (all-zero) at build time |
+| `version` | *(blank)* | field is empty (all-zero); the `5.0.2` version appears as a standalone string in DROM (a Python module constant), not in the OTA descriptor |
 | `time` / `date` | `15:08:47`, `Aug 27 2026` | build timestamp |
 | `idf_ver` | `v5.4-dirty` | ESP-IDF v5.4 with local modifications |
 | `secure_version` | `0` | anti-rollback secure version counter is unused |
+| `min_efuse_blk_rev_full` | `0` | minimum eFuse block revision (value confirmed from bytes; semantics per ESP-IDF layout) |
+| `max_efuse_blk_rev_full` | `99` (`0x0063`) | maximum eFuse block revision 0.99 (value confirmed from bytes; semantics inferred) |
+| `mmu_page_size` | `16` → 64 KiB | flash MMU page size; the 64-KiB page matches the `+0x20`-into-a-page flash mapping (value confirmed from bytes; semantics inferred) |
 | `app_elf_sha256` | `31122473…e5dd0638` | hash of the source ELF (not the .bin file) |
 
 <Note>
@@ -41,12 +52,18 @@ built. This is normal for vendor firmware and does not indicate tampering.
 
 ## Integrity
 
-The image carries two integrity mechanisms, both validated during analysis:
+The image carries two integrity mechanisms, both validated with `esptool`:
 
-- A one-byte **XOR checksum** over the segment data (`0x1f`, valid).
-- A **SHA-256** appended to the image (`hash_appended = 1`), which the bootloader
-  verifies before booting. This is an image-integrity hash, not a cryptographic
-  signature; Secure Boot was not observed to be enforced in this image.
+- A one-byte **XOR checksum** over the segment data: `0x1f` (valid).
+- An appended **SHA-256** (`hash_appended` set): `2a01e0f5…31058c` (valid), which the
+  bootloader verifies before boot. This is an image-integrity hash, not a cryptographic
+  signature; no Secure Boot signature block was observed in this image.
+
+<Note>
+These three hashes are distinct: the **image-file** SHA-256 (`a6d05597…`, the whole `.bin`,
+listed by the release API), the **appended validation** hash (`2a01e0f5…`, inside the image),
+and the **app ELF** hash (`311224…`, in `esp_app_desc_t`, pinning the source ELF).
+</Note>
 
 ## Runtime: MicroPython
 

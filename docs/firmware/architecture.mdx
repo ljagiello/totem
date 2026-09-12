@@ -1,6 +1,6 @@
 ---
 title: "Application architecture"
-description: "The MicroPython application: 98 frozen modules and how they are layered."
+description: "The MicroPython application: 96 frozen modules and how they are layered."
 ---
 
 ## Layered view
@@ -60,7 +60,7 @@ Reusable infrastructure used by everything above it.
 | Module | Role |
 | --- | --- |
 | `main.py` | OTA orchestration |
-| `hotspot.py` | phone-hotspot update flow (`totemupdate` SSID) |
+| `hotspot.py` | phone-hotspot update flow (`totemupdate` SSID) — now **sunset**; WiFi OTA (`Performing Firmware update via WiFi`) is the active update path |
 | `install_ota.py` | write + activate the new slot |
 | `config.py`, `system.py`, `f_assets.py` | update config, system helpers, asset fetch |
 
@@ -102,4 +102,10 @@ package schedule long-running coroutines (BLE service loop, mesh outbox drain, G
 polling, LED animation ticks, background checks). Log lines such as
 `task started, waiting on enable events` and `task cancelled` show tasks gated by
 events from the `event_manager` bus, so subsystems can be paused and resumed (for
-example, LEDs and radios are suspended during light sleep to save power).
+example, events such as `evt_ble_active` and `evt_battery_usable` gate BLE and
+battery-dependent tasks).
+
+A separate async watchdog-feed loop (`wdt_manager.py` / `WdtManager`) runs alongside
+`task_mgr` and asyncio: it feeds the hardware WDT via `wdt_feed_loop` / `feed_now`
+only while its `WdtBlockers` and `WdtConditions` gates allow, so a stalled subsystem
+stops the feed and lets the watchdog fire.

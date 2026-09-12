@@ -10,28 +10,49 @@ IRAM; constants and the frozen Python bytecode live in DROM.
 
 | Seg | Load address | Size (bytes) | Region | Perms | Contents |
 | --- | --- | --- | --- | --- | --- |
-| 0 | `0x3f400020` | 448,836 | DROM | R | rodata: qstr pool, string constants, **frozen Python bytecode** |
-| 1 | `0x3ff80060` | 28 | RTC slow | RW | RTC-retained data |
+| 0 | `0x3f400020` | 448,836 | DROM | R | `esp_app_desc_t`, then rodata: qstr pool, string constants, **frozen Python bytecode** |
+| 1 | `0x3ff80060` | 28 | RTC fast | RW | RTC-retained data (`.rtc.data`, data bus) |
 | 2 | `0x3ffbdb60` | 9,864 | DRAM | RW | initialized data |
 | 3 | `0x400d0020` | 1,108,228 | IROM | R-X | MicroPython VM + ESP-IDF code |
 | 4 | `0x3ffc01e8` | 13,384 | DRAM | RW | initialized data |
 | 5 | `0x40080000` | 111,788 | IRAM | RWX | time-critical code, ISRs |
-| 6 | `0x400c0000` | 96 | RTC fast | RWX | RTC-retained code |
+| 6 | `0x400c0000` | 96 | RTC fast | RWX | RTC-retained code (`.rtc.text`, instruction bus) |
+
+Segments 1 and 6 address the *same* RTC FAST memory through different buses: seg 1
+is the data-bus view (`.rtc.data`) and seg 6 the instruction-bus view (`.rtc.text`).
+RTC SLOW memory (`0x50000000`–`0x50002000`) is not used by any segment.
+
+<Note>
+Structural details of the layout above:
+
+- **DROM starts with the OTA descriptor.** The first 256 bytes of segment 0 are the
+  [`esp_app_desc_t`](/firmware/overview) application descriptor (build date, IDF
+  version, ELF SHA-256), ahead of the rodata / qstr pool / frozen bytecode.
+- **`+0x20` load offset.** Both flash-mapped segments (`0x3f400020`, `0x400d0020`)
+  load `0x20` above their 64-KiB-aligned MMU page bases (`0x3f400000` / `0x400d0000`):
+  the 24-byte `esp_image_header_t` and the 8-byte segment-0 header occupy the first
+  `0x20` bytes in flash, ahead of the segment payload.
+- **Segments 2 and 4 are contiguous in DRAM.** `0x3ffbdb60 + 0x2688 = 0x3ffc01e8`
+  (seg 4's start), so the two initialized-data segments form one continuous region
+  even though the IROM segment sits between them in image order.
+</Note>
 
 Entry point is `0x40081144`, in IRAM (segment 5). The disassembled prologue is the
-standard ESP32 startup (`entry`, load of the exception `vecbase`, then into the IDF
-`call_start_cpu0` path).
+standard ESP32 startup: `entry`, a load into the exception `vecbase`, then a `callx8`
+into early init. The entry routine itself is (inferred) the IDF `call_start_cpu0` —
+the rebuilt ELF has no symbol table, so it cannot be confirmed by symbol.
 
 ## ESP32 address regions (reference)
 
 | Range | Region | Use |
 | --- | --- | --- |
 | `0x3f400000`–`0x3f800000` | DROM | flash-mapped constant data |
-| `0x3ff80000`–`0x3ff82000` | RTC slow | retained across deep sleep |
+| `0x3ff80000`–`0x3ff82000` | RTC fast (data bus) | retained data across deep sleep |
 | `0x3ffae000`–`0x40000000` | DRAM | data / heap |
 | `0x40070000`–`0x400a0000` | IRAM | instruction RAM |
-| `0x400c0000`–`0x400c2000` | RTC fast | retained code/data |
+| `0x400c0000`–`0x400c2000` | RTC fast (instr bus) | retained code/data |
 | `0x400d0000`–`0x40400000` | IROM | flash-mapped instructions |
+| `0x50000000`–`0x50002000` | RTC slow | retained across deep sleep |
 
 ## Rebuilt ELF
 

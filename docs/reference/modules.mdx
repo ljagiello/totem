@@ -1,10 +1,17 @@
 ---
 title: "Module reference"
-description: "All 98 frozen MicroPython modules in the v5.0.2 image, with inferred roles."
+description: "All 96 frozen MicroPython modules in the v5.0.2 image, with inferred roles."
 ---
 
 Every module below is frozen into the firmware. Names are exact (from the frozen module
 registry); roles are inferred from symbols, string constants, and log lines.
+
+<Note>
+  The frozen-module registry (`mp_frozen_names`) holds exactly **96** entries — the
+  modules listed on this page. Two more `.py` files, `boot.py` and `webrepl_cfg.py`,
+  exist only as on-flash VFS filesystem paths (`./boot.py`, `./webrepl_cfg.py`) and are
+  **not** frozen, which is why some tallies of the image reach 98.
+</Note>
 
 ## Top-level application
 
@@ -75,9 +82,9 @@ registry); roles are inferred from symbols, string constants, and log lines.
 
 | Module | Role |
 | --- | --- |
-| `espnow.py` | ESP-NOW wrapper |
+| `espnow.py` | ESP-NOW wrapper/shim (origin uncertain; stock MicroPython ships `espnow` as a C module) |
 | `espnow_conn_v2.py` | connection/session layer |
-| `espnow_msg.py` | message model (`cat_id`/`cmd_id`, `TOTEM_MSG_MAP`) |
+| `espnow_msg.py` | message model (`cat_id`/`*_cmd_id`, `TOTEM_MSG_MAP`) |
 | `aioespnow.py` | asyncio ESP-NOW (`AIOESPNow`) |
 | `peer_auto_bond.py` | automatic peer bonding |
 | `peer_helpers.py` | peer utilities |
@@ -149,4 +156,4 @@ registry); roles are inferred from symbols, string constants, and log lines.
 Frozen library modules that ship with or are vendored into MicroPython, not Totem-specific:
 `asyncio/` (`__init__`, `core`, `event`, `funcs`, `lock`, `stream`), `uasyncio.py`,
 `requests/__init__.py`, `urequests.py`, `mip/__init__.py`, `ssl.py`, `upysh.py`,
-`webrepl.py`, `webrepl_setup.py`, `neopixel.py`.
+`webrepl.py`, `webrepl_setup.py`.

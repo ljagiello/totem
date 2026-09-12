@@ -13,16 +13,21 @@ description: "Battery/sleep management, the Touch Crystal, the SOS button, Vibe 
 | Boot cause | `BOOT_POWER_ON`, `BOOT_SHUTDOWN` |
 | Battery health | `Changing battery health to: {}`, `BATT_POOR_TOUCH` |
 | Low-voltage cutoff | `Voltages too low, powering down | {}v` |
-| OTA gate | `Battery too low for OTA update` (≥50% required) |
+| OTA gate | `Battery too low for OTA update` (guard confirmed; the numeric threshold is not present in the binary) |
 
 ### Sleep
 
-The device targets multi-hour battery life (up to ~12 h for v5.0) via aggressive sleep.
+The device uses aggressive sleep to extend battery life. A specific "~12 h for v5.0"
+endurance figure is not evidenced in the binary (it comes from the v5.0 release
+notes/marketing); the only `12`-hour literal, `[activation_check] Activation doesn't start for 12hrs`,
+concerns activation timing, not battery endurance.
 
 <CardGroup cols={2}>
   <Card title="Light sleep" icon="moon">
     `Awoke from lightsleep | Slept for: {} of {} | Total Sleep: {} | sleep duty: {:.3f}`.
-    Radios and LEDs are gated off; a `dev_total_lightsleep_ms` counter tracks duty.
+    Radios are gated off (`Not sleeping due radio needing to turn on soon`); LED gating
+    during light sleep is inferred, not directly evidenced. A `dev_total_lightsleep_ms`
+    counter tracks duty.
   </Card>
   <Card title="Deep sleep" icon="power-off">
     State persists in RTC memory (`f_lib/rtc_mem.py`, `rtc_v2.py`).
@@ -33,26 +38,82 @@ The device targets multi-hour battery life (up to ~12 h for v5.0) via aggressive
 GNSS RTC sync can hold off sleep (`Block sleep for GNSS RTC Sync`) so a time sync
 completes before the device drops power.
 
+### Watchdogs
+
+`wdt_manager.py` runs a condition/blocker model: the watchdog fires only when its
+conditions are met **and** nothing is blocking it (classes `WdtManager` / `WdtConditions`
+/ `WdtBlockers`).
+
+| Concept | Evidence |
+| --- | --- |
+| Feed loop | `Starting WDT feed loop`, `Manually feeding WDT` |
+| Threshold updates | `Updating WDT threshold from: {} to {}` |
+| Condition/blocker engine | `[WDT {}] cond=[{}] blk=[{}]` |
+| Recovery / boot-loop counters | `Performing immediate WDT Recovery`, `calc_recovery_risk`, `recovery_count`, `boots_wdt` |
+| BLE handoff watchdog | `ble_handoff_watchdog`, `[BLE Watchdog] Handoff stall detected` |
+
+A separate `ble_handoff_watchdog` guards BLE TX-ownership handoff between the phone app
+and the ESP, reclaiming TX priority when a stall is detected
+(`[BLE Watchdog] Handoff stall detected`).
+
 ## Touch Crystal
 
-Capacitive touch input via `touch_button_v2.py` (`io_mgr.py` for the pin plumbing).
+Capacitive touch input via `touch_button_v2.py` (`io_mgr.py` for the pin plumbing), which
+wraps a custom native driver `c_cap_touch` (python name `cap_touch`) built on the ESP-IDF
+`touch_pad` API (`touch_pad_init failed`, etc.) — not the stock touch module.
 
 | Concept | Evidence |
 | --- | --- |
 | Tap events | `[on_touch] Event | tap_count: {} | duration_ms: {}` |
 | Gestures | `DOUBLE_TAP`, single tap, `on_release`, `Taps: {}` |
-| Adaptive sensitivity | `[touch] Low battery mode ON/OFF | sens: {:.3f}` |
+| Adaptive sensitivity | `[touch] Low battery mode ON` / `[touch] Low battery mode OFF` |
 | Debounce after boot | `Booted: {} ago, waiting: {} before enabling touch` |
 | Temporary disable | `Block Touch starting/Completed: {}` |
 
 Touch sensitivity is recalibrated as the battery drains so the crystal keeps working at
-low voltage.
+low voltage. The two low-battery log forms differ: OFF reports a single value
+(`[touch] Low battery mode OFF | sens: {:.3f}`), while ON reports the base and scaled
+values (`[touch] Low battery mode ON | base_sens: {:.3f}` then ` adjusted: {:.3f}`) via
+`_LOW_BATT_FLOOR` and `_LOW_BATT_MULTIPLIER`.
+
+### Native parameter validation bounds
+
+The native `c_cap_touch` driver validates its parameters against these literal ranges.
+These are **validation bounds**, not defaults — the defaults are non-extractable
+bytecode/C constants.
+
+| Parameter | Allowed range |
+| --- | --- |
+| `sensitivity` | 0.1–10.0 |
+| `multi_tap_window` | 50–2000 ms |
+| `sample_interval` | 5000–200000 us |
+| `short_hold_ms` | 50–5000 |
+| `long_hold_ms` | 50–10000 |
+| `ex_long_hold_ms` | 50–30000 |
+| `auto_tune_multiplier` | 1.0–20.0 |
 
 ## SOS button
 
-`button.py` (`AsyncButton`) handles the physical button. A **triple-click** puts the
-device into the [hotspot OTA](/protocols/wifi-ota) updater. The button also drives
-normal UI actions and the SOS alerting feature.
+`button.py` (`AsyncButton`) handles the physical button with an async press/hold model
+(`long_hold_task`, on-hold callbacks). It drives normal UI actions and the SOS alerting
+feature. The SOS trigger is timing/pattern-based (`sos_timing`, plus software SOS
+`sw_sos`) rather than a confirmed gesture — the binary carries no literal tying a
+physical-button triple-click to any action, and `cb_triple_tap` is wired to the Touch
+Crystal, not the physical button.
+
+| Confirmed SOS behavior | Evidence |
+| --- | --- |
+| Mute / un-mute | `Muting SOS`, `Un-muting SOS`, `is_sos_mute` |
+| Peer-in-SOS propagation (mesh) | `evt_peer_in_sos` |
+| Crystal LED indication | `crystal_sos`, `crystal_sos_blink` |
+| Trigger | timing/pattern-based (`sos_timing`); gesture undetermined from binary |
+
+<Note>
+  Firmware updates run over direct [WiFi OTA](/protocols/wifi-ota)
+  (`Performing Firmware update via WiFi`, `is_wifi_ota`). The older hotspot OTA path
+  appears **sunset** in v5.0.2 (`OTA Hotspot has been sunset`), so it is not the active
+  update path despite `f_ota/hotspot.py` still being present.
+</Note>
 
 ## Vibe Mode (passive calibration)
 
@@ -68,11 +129,16 @@ NEWVIBE {} | reads={} sleep={}ms median NB={} | scale=auto p93 up={} k=1/{} sc={
 ```
 
 It runs as a gated asyncio task (`task started, waiting on enable events`,
-`resumed after pause`, `task cancelled`), feeding calibration samples into the compass
-(`gap_xy` residual) — the "passive calibration in Vibe Mode" from the v5.0 release notes.
+`resumed after pause`, `task cancelled`) — the "passive calibration in Vibe Mode" from the
+v5.0 release notes. The `gap_xy` residual often associated with it is confirmed, but that
+telemetry lives in the magnetometer bias-handoff/fusion engine
+(`Bias handoff 2D->3D ({}) | gap_xy={:.1f}uT`, `2D governs, gap_xy={:.1f}uT`); whether Vibe
+Mode feeds it directly is inferred, not confirmed.
 
 ## Temperature sensor
 
-`ds18x20.py` + `onewire.py` drive a **DS18B20** 1-Wire temperature sensor
-(`_search_rom`, `DS18X20`), used for temperature compensation and/or environment
-reporting.
+`ds18x20.py` + `onewire.py` provide a **DS18B20** 1-Wire temperature driver
+(`_search_rom`, `DS18X20`). The driver is compiled in and instantiable, but there is no
+runtime-log evidence (no `°C` / `celsius` / `temperature: {}` string) that a sensor is
+physically wired and polled, so its actual use for temperature compensation or environment
+reporting is inferred, not confirmed.

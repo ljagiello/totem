@@ -3,9 +3,11 @@ title: "Bluetooth LE"
 description: "The GATT peripheral the phone app talks to: UUIDs, advertising, connection handshake, and transfer."
 ---
 
-The Totem is a **BLE peripheral**; the phone app is the central. The stack is
-NimBLE (via MicroPython's `bluetooth`), driven by `f_ble/peripheral.py`,
-`ble_controller.py`, `ble_core.py`, and `ble_manager.py`.
+The Totem is a **BLE peripheral** for the phone-app link (the app is the central), but the
+firmware also compiles the **central** role and uses it for some flows such as the OTA-BLE
+client (`Starting OTA Bluetooth connection`). The stack is NimBLE (via MicroPython's
+`bluetooth`), driven by `f_ble/peripheral.py`, `ble_controller.py`, `ble_core.py`, and
+`ble_manager.py`.
 
 ## GATT identifiers
 
@@ -13,14 +15,19 @@ Custom 128-bit UUIDs recovered verbatim from the image:
 
 | UUID | Role (inferred) |
 | --- | --- |
-| `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` | primary Totem service |
 | `7913b588-0000-4635-b066-baa2cfc197cf` | transfer service base |
 | `7913b588-0001-4635-b066-baa2cfc197cf` | characteristic (e.g. RX / write) |
 | `7913b588-0002-4635-b066-baa2cfc197cf` | characteristic (e.g. TX / notify) |
 
-The `7913b588-000x` family uses an incrementing 4th field for the service (`0000`) and
-its characteristics (`0001`, `0002`) — the standard write/notify pair for a chunked
-serial-style transport. Transfer is implemented in `svc_ble_transfer.py`.
+The `7913b588-000x` family uses an incrementing **second 16-bit group** for the service
+(`0000`) and its characteristics (`0001`, `0002`) — the standard write/notify pair for a
+chunked serial-style transport. Transfer is implemented in `svc_ble_transfer.py`.
+
+<Note>
+  `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` also appears in the image but is **not** a BLE
+  UUID — it is the RFC 6455 WebSocket handshake magic GUID used by MicroPython's WebREPL.
+  There are exactly three BLE UUIDs, all in the `7913b588` family.
+</Note>
 
 ## Advertising
 
@@ -46,7 +53,11 @@ BLE is normally **off to save power** and comes up on demand. The controller log
 
 A **blocker** system (`BleBlockers`, `Setting BLE block to: {} | for index: {}`) lets
 subsystems veto BLE while they need the radio, then BLE silently reconnects when the
-last blocker clears.
+last blocker clears. A separate **scheduled-disconnect manager** (`ble_schedule_mgr`,
+`evt_ble_schedule_disconn`) governs the on-demand connect/disconnect lifecycle
+(`[ble_schedule_mgr] BLE scheduled disconnection requested`,
+`[ESP-NOW] | Requesting BLE Scheduled Disconnect`), honouring
+`[ESP-NOW] | BLE Auto Reconnect is disabled in App`.
 
 ## Connection handshake
 
@@ -77,23 +88,40 @@ The link is **half-duplex** with an explicit transmit owner:
 | Symbol / log | Meaning |
 | --- | --- |
 | `is_tx_owner`, `is_tx_ready` | which side may transmit, and whether it is ready |
-| `Half-duplex is used; exiting send_data loop` | yield the link to the peer |
-| `BLE ACK Comms Handoff` | acknowledge handoff of the app connection |
+| `Half-duplex is used; exiting send_data loop` | yield the radio before sending |
+| `Generating comms handoff`, `BLE ACK Comms Handoff` | hand the radio between the two paths |
+| `last_handoff_to_app`, `last_handoff_to_esp` | the two handoff targets: BLE (app) and ESP-NOW (mesh) |
 | `ble_handoff_watchdog`, `[BLE Watchdog] Handoff stall detected` | recover a stalled owner |
 
-Because Totems mesh, a single phone connection can be **handed off** between bonded
-Totems so the app effectively talks to the whole group through whichever Totem currently
-owns the link. The watchdog guarantees liveness if an owner stalls.
+The BLE link to the app and the ESP-NOW mesh share a **single radio** on the device, so
+transmit ownership alternates between them: the "comms handoff" moves the radio between the
+app-facing BLE path (`last_handoff_to_app`) and the peer-facing ESP-NOW path
+(`last_handoff_to_esp`), gated by `is_tx_owner` / `is_tx_ready`
+(`Wait for ESP-NOW Comms to be sent before sending BLE message`). The watchdog guarantees
+liveness if an owner stalls.
 
 ## Keys & bonding
 
-BLE bonding keys are persisted in `ble_keys.bin`. Pairing/bond management is handled by
-the controller (`add_new_bond`, `create_promo_bond`); see also the mesh
-[peer bonding](/protocols/espnow-mesh) which is a separate, Totem-to-Totem concept.
+BLE bonding keys are persisted in `ble_keys.bin`. Secrets are cached in RTC memory and
+written through to VFS in a two-tier restore (`Saving BLE secrets to rtc memory`,
+`Saving BLE secrets to VFS`, `BLE secrets found in RTC memory, saving to VFS`,
+`Checking for BLE secrets on VFS`; `save_ble_secrets`, `restore_ble_secrets_vfs`,
+`add_secret`), so bonds survive resets.
+
+App pairing / passkey handshake uses `gap_pair`, `gap_passkey`, `is_pairing`,
+`cancel_pairing`. The separate `add_new_bond` / `create_promo_bond` symbols belong to the
+**Totem-to-Totem** peer auto-bonding mechanism (`[create_promo_bond] Created Bond!`,
+`Creating promo activation bond`, `is_promo_bond`) — see the mesh
+[peer bonding](/protocols/espnow-mesh) page, not app pairing.
 
 ## OTA over BLE
 
 `ota_ble.py` + `svc_ble_transfer.py` carry a firmware image over the same chunked GATT
-transport for app-driven Bluetooth updates (`Connected to OTA BLE`, `cb_start_ota`,
-`close_ota`). This is the "update via the app" path; the WiFi hotspot path is the
-fallback. See [OTA](/subsystems/ota).
+transport for app-driven Bluetooth updates (`Starting OTA Bluetooth connection`,
+`Connected to OTA BLE`, `cb_start_ota`, `close_ota`). This is the live "update via the
+app" path. The legacy WiFi-hotspot OTA path has been retired (`OTA Hotspot has been
+sunset`) and is no longer a live fallback. See [OTA](/subsystems/ota).
+
+A Totem can also trigger OTA on nearby peers over the BLE/ESP-NOW mesh — the "demigod"
+fleet push-OTA (`Sending OTA command to update nearby devices`, `Demigod to update nearby
+devices`; `demigod_gen_ota_update`, `enable_demi_daemon`, `demi_god.py`).

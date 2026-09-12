@@ -13,21 +13,25 @@ all findings come from reading the firmware binary and the companion mobile app.
 ## What this documents
 
 The **Totem Compass** is a festival navigation and social device: a handheld puck with
-a ring of addressable LEDs (the "halo"), a capacitive "Touch Crystal", a GNSS receiver,
-an IMU, and three 2.4 GHz radios. Groups of Totems bond into a mesh so friends can find
+a ring of addressable LEDs (called the "halo" in the companion app; `RING_PX_COUNT` in
+firmware), a light-up capacitive touch crystal (the app's "Touch Crystal";
+`CRYSTAL_PX_COUNT` plus the ESP32 `touch_pad` peripheral), a GNSS receiver, an IMU, and
+three 2.4 GHz radios. Groups of Totems bond into a mesh so friends can find
 each other, send taps and messages, and navigate to a shared point.
 
 This site documents firmware **v5.0.2** at the level recoverable from the binary:
 
 - The firmware is an **ESP32** application built on **ESP-IDF v5.4**.
 - The device runs **MicroPython v1.25.0**; all of Totem's own logic is **Python**,
-  frozen into the image as compiled bytecode across **98 modules**.
+  frozen into the image as compiled bytecode across **96 modules** (plus 2 on-flash VFS
+  source files, `boot.py` and `webrepl_cfg.py`, for 98 total `.py` files).
 - Three radios share the 2.4 GHz band: **BLE** (phone app), **ESP-NOW** (Totem-to-Totem
-  "Unity Mesh"), and **WiFi** (hotspot OTA updates).
+  mesh, called the "Unity Mesh" in the companion app; `MODE_ESP_NOW_*` / `MESH_*` in
+  firmware), and **WiFi** (station-mode OTA updates; the device-hosted hotspot path is sunset).
 
 <CardGroup cols={2}>
   <Card title="Firmware architecture" icon="microchip" href="/firmware/architecture">
-    MicroPython app layout, the 98 frozen modules, and how they fit together.
+    MicroPython app layout, the 96 frozen modules, and how they fit together.
   </Card>
   <Card title="2.4 GHz protocols" icon="tower-broadcast" href="/protocols/overview">
     BLE, ESP-NOW mesh, WiFi OTA — message format, categories, and framing.
@@ -45,14 +49,15 @@ This site documents firmware **v5.0.2** at the level recoverable from the binary
 | Property | Value |
 | --- | --- |
 | Product | Totem Compass |
-| Version | 5.0.2 (release id 335, S3 branch `totem`) |
-| SoC | ESP32 (original), Xtensa LX6 dual-core, chip id 0 |
+| Version | 5.0.2 (S3 branch `totem`); release id 335 is a frozen-bytecode constant, not present in the binary strings (needs disassembly) |
+| SoC | ESP32 (original), Xtensa dual-core (LX6, inferred), chip id 0 (inferred; `ESP_CHIP_ID_ESP32`) |
 | Framework | ESP-IDF v5.4 (`-dirty`) |
 | Runtime | MicroPython v1.25.0 |
 | Build date | Aug 27 2026, 15:08:47 |
 | Image size | 1,692,352 bytes |
-| SHA-256 | `a6d05597f0f88f64313ba512287f89af25b9c31e2cd80dc85c8cf426c7bf8896` |
-| Flash | 4 MB, DIO @ 40 MHz |
+| SHA-256 (image file) | `a6d05597f0f88f64313ba512287f89af25b9c31e2cd80dc85c8cf426c7bf8896` (of the flashable `.bin`; matches the release API and the download) |
+| App ELF SHA-256 | `311224730a53aeab5f6b57b9475d88aefcc1199e290cf0f4886836a0e5dd0638` (`esp_app_desc_t.app_elf_sha256`, pins the source ELF — confirmed in the binary; a distinct value from the image-file hash above) |
+| Flash | 4 MB, DIO @ 40 MHz (read from the image header via `esptool`) |
 | Segments | 7 (see [memory map](/firmware/memory-map)) |
 
 ## How to read this documentation

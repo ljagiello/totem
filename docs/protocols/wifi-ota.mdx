@@ -1,55 +1,89 @@
 ---
-title: "WiFi (hotspot OTA)"
-description: "The third 2.4 GHz role: joining a phone hotspot to download firmware over HTTP."
+title: "WiFi (OTA updates)"
+description: "The third 2.4 GHz role: station-mode WiFi used to pull firmware/preview updates over HTTP."
 ---
 
 WiFi is used almost exclusively for **over-the-air updates** when the Bluetooth path is
 unavailable (for example, when the device is on firmware older than the app supports).
-Driven by `f_lib/wifi.py` / `wifi_v2.py`, `f_ota/hotspot.py`, and `f_lib/requests.py`.
+Driven by `f_lib/wifi.py` / `wifi_v2.py`, `f_lib/firmware_ota.py`, `f_lib/requests.py`,
+and `ota_daemon`.
 
-## The hotspot method
+<Note>
+In v5.0.2 the phone-**hotspot** OTA path is **sunset** (`OTA Hotspot has been sunset`).
+The live path is **station-mode WiFi** (updates performed "via WiFi"), typically kicked
+off by an OTA command received over the device's API WebSocket. The hotspot section
+lower down is retained as **legacy**: its credentials and soft-AP machinery are still
+compiled in, but it is no longer the current update mechanism.
+</Note>
 
-The device joins a **phone personal hotspot** configured with fixed credentials, then
-pulls the update over plain HTTP.
+## The current path: station-mode WiFi OTA
 
-| Parameter | Value |
+The device connects to a saved/nearby WiFi network in **station mode** (`conn_to_wifi`,
+`Searching for WiFi network`) and performs the update **over HTTP**. Two update methods
+exist, distinguished in the logs, with different package formats:
+
+| Method | Log string | Package format |
+| --- | --- | --- |
+| Firmware | `Performing Firmware update via WiFi` | `.bin` (`.bin package not found in repo`) |
+| Preview | `Performing Preview update via WiFi` | `.tgz` gzipped tar (`.tgz package not found in repo`, `Downloaded file is not .tgz`) |
+
+The payload for either method is described by a downloaded **JSON manifest**
+(`package.json` / `contents.json`, `Downloading content.json`), not a fixed filename.
+The image streams into the inactive OTA slot via `ota_block_writer.py`, its SHA-256 is
+verified (`File integrity confirmed!` / `SHA256 hash does NOT match`), and on success the
+device reboots into the new slot (`OTA completed successfully!`).
+
+### Command-triggered over the API WebSocket
+
+The device opens a **client WebSocket** to the API host and can be told to update over it
+— this, not a user gesture, is the non-sunset trigger.
+
+| Signal | Evidence |
 | --- | --- |
-| SSID | `totemupdate` |
-| Password | `totem1234` |
-| Band | 2.4 GHz (iOS "Maximize Compatibility", Android "Compatibility Mode") |
-| Trigger | triple-click the SOS button while powered on |
+| WebSocket to API | `WebSocket Connection initiated...` / `WebSocket Init Request...`, sitting beside `http://api.totemportal.com` |
+| OTA command | `Sending OTA command to update nearby devices`, `Demigod to update nearby devices`, qstr `demigod_gen_ota_update` |
+| OTA daemon | symbols `ota_daemon` / `ota_cmd` (`from ota_daemon import *`) |
 
-<Steps>
-  <Step title="Enter update mode">
-    Triple-click SOS. The device reboots into the hotspot updater and shows a
-    "searching for WiFi" halo animation (`anim_gnss_search`-style states).
-  </Step>
-  <Step title="Join totemupdate">
-    Station mode connects to the `totemupdate` SSID on 2.4 GHz (`conn_to_wifi`).
-    A pink spinning animation indicates it cannot find/join the hotspot.
-  </Step>
-  <Step title="Download firmware">
-    Over HTTP via `f_lib/requests.py`, streaming into the inactive OTA slot
-    (`ota_block_writer.py`). White progress ring = downloading.
-  </Step>
-  <Step title="Verify & reboot">
-    Image hash is checked; on success the ring fills white and the device reboots into
-    the new slot. On failure the outer ring blinks orange and it reverts.
-  </Step>
-</Steps>
+After the command is received, the device runs the station-WiFi download described above.
+
+### Battery gate
+
+<Note>
+OTA is **battery-gated**: `Battery too low for OTA update` (`low_battery` /
+`monitor_battery` / `battery_volt`). The exact voltage/percent threshold is **not present
+as a literal** in this firmware — it lives in bytecode and cannot be recovered from
+strings. Only the gate itself is confirmed.
+</Note>
 
 ## Where the firmware comes from
 
-The device (and the phone app) fetch release metadata from the Totem API and download
-the image from S3. The URL is built deterministically — see
-[download URL](/reference/download-url) for the exact construction. For v5.0.2:
+The device fetches release metadata from the Totem API and downloads the package from S3.
+On-device, the payload is **resolved through a JSON manifest** (`package.json` /
+`contents.json`) rather than a fixed filename: version is tracked as a **release code**
+(`release_code` / `release_id` / `MPY_OTA_VER`), and `5.0.2` appears only as a version
+banner, never as a path or filename.
+
+The confirmed on-device host literal uses **`http://`** (see Transport security below):
 
 ```text
-https://datapeak-developer.s3.us-east-1.amazonaws.com/totem_compass/totem/5.0.2/firmware_v5.0.2.bin
+http://datapeak-developer.s3.us-east-1.amazonaws.com/{}
 ```
 
-The device-side endpoints are templated as `{base}/devices/{mac}/ota` and
-`{base}/devices/{mac}/ota?updated`.
+<Note>
+A phone-app-style URL such as
+`http://datapeak-developer.s3.us-east-1.amazonaws.com/totem_compass/totem/5.0.2/firmware_v5.0.2.bin`
+is a **phone-app construction**, not a device literal. The filename component
+`firmware_v<code>.bin` does **not** appear anywhere in this firmware (zero matches across
+all segments `seg0`–`seg6` and the ELF). What *is* confirmed on-device is the bucket /
+product / branch dirs (`totem_compass`, `totem_compass/totem`) plus the templated host
+`…/{}`; the concrete filename is built app-side. See
+[download URL](/reference/download-url) for the full breakdown.
+</Note>
+
+The device-side endpoints are templated as `{base}/devices/{}/ota` and
+`{base}/devices/{}/ota?updated` (confirmed literals, two `{}` placeholders each). The
+second placeholder is **inferred** to be the device MAC/ID (`get_mac_addr` / `BT_MAC` /
+`Device ID`), not byte-confirmed.
 
 ## Transport security
 
@@ -63,9 +97,62 @@ cleartext. Whether the image is additionally signature-verified (ECDSA) at insta
 is not determinable from strings alone.
 </Warning>
 
+## The hotspot method (legacy / sunset)
+
+<Warning>
+This path is **sunset** in v5.0.2 (`OTA Hotspot has been sunset`). The credentials and
+soft-AP machinery are still present in the image, but it is no longer the active update
+mechanism. Documented here for completeness.
+</Warning>
+
+Historically the device joined a **phone personal hotspot** configured with fixed
+credentials, then pulled the update over plain HTTP.
+
+| Parameter | Value |
+| --- | --- |
+| SSID | `totemupdate` |
+| Password | `totem1234` |
+| Band | 2.4 GHz (iOS "Maximize Compatibility", Android "Compatibility Mode") |
+| Trigger | historically a triple-**tap** of the SOS button (see note below) |
+
+<Steps>
+  <Step title="Trigger">
+    The SOS button is a **capacitive touch** button (`TouchButtonV2` / `touch_button_v2`,
+    callback `cb_triple_tap`) — a triple-**tap**, not a "click". In this firmware the
+    triple-tap gesture is associated with **SOS** (`start_sos`, `sos_led`, `enable_sos`),
+    and there is **no** `update mode` / `updater` string in the image; OTA appears to be
+    **command-triggered** over the API WebSocket (above), not entered by this gesture.
+    The "searching for WiFi" halo animation is supported (`anim_gnss_search`,
+    `Searching for WiFi network`).
+  </Step>
+  <Step title="Join totemupdate">
+    Station mode connects to the `totemupdate` SSID on 2.4 GHz (`conn_to_wifi`).
+  </Step>
+  <Step title="Download">
+    Over HTTP via `f_lib/requests.py`, streaming into the inactive OTA slot
+    (`ota_block_writer.py`).
+  </Step>
+  <Step title="Verify & reboot">
+    The image SHA-256 is checked (`File integrity confirmed!` /
+    `SHA256 hash does NOT match`); on success the device reboots into the new slot, on
+    failure it reverts.
+  </Step>
+</Steps>
+
+<Note>
+The specific OTA-state LED colors and ring/spinner animations earlier drafts described
+(pink spinning ring = can't join, white progress ring = downloading, ring fills white =
+success, orange blink = failure) are **not confirmed** by the WiFi/OTA strings. Only
+palette color symbols like `hot_pink` and `orange` (and `PROGRESS_RGB` / `ERROR_RGB`)
+exist — there is no ring/spinner/progress-ring animation string binding a color to an OTA
+state. The one supported state reference is the "searching for WiFi" halo
+(`anim_gnss_search`); any color-to-state mapping would need separate LED/animation
+analysis to confirm.
+</Note>
+
 ## WiFi capabilities present
 
-Beyond the hotspot updater, the WiFi driver exposes standard station/AP features
-(scan, connect, protocol/tx-power control — `WLAN settings changed to (pwr, proto,
-txpower)`). These share the single 2.4 GHz radio with BLE and ESP-NOW and are not used
-during normal navigation, only for updates and any cloud sync.
+Beyond OTA, the WiFi driver exposes standard station/AP features (scan, connect,
+protocol/tx-power control — `WLAN settings changed to (pwr, proto, txpower)`). These
+share the single 2.4 GHz radio with BLE and ESP-NOW and are not used during normal
+navigation, only for updates and any cloud sync.

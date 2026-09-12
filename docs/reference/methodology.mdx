@@ -58,33 +58,107 @@ built.
 
 ## Closing the remaining gaps
 
-Three items are graded "needs bytecode disassembly" in the
+Three items were graded "needs bytecode disassembly" in the
 [protocol completeness matrix](/protocols/overview):
 
 1. The complete per-category `cmd_id` enumeration (`TOTEM_MSG_MAP`).
 2. The exact binding of each `struct` format to a specific message.
 3. The field order of `CHUNK_HDR_FMT`.
 
-To recover them:
+The frozen-bytecode disassembly has now been carried out and all three are **recovered**.
+The values below are literals present in the binary — every `struct`-format string appears
+verbatim in the DROM rodata — and the method that produced them is recorded afterward.
+
+<Note>
+The [`/protocols/overview`](/protocols/overview) completeness matrix now marks these three
+as **Recovered** and reproduces the full decoded map; this page records how they were obtained.
+</Note>
+
+### `TOTEM_MSG_MAP` — confirmed
+
+Defined in `espnow_conn_v2.py`, built by a `BUILD_MAP 13` / `STORE_NAME TOTEM_MSG_MAP`
+opcode sequence (fully decoded). The map is **flat**, keyed by a 2-byte `bytes` value
+`(cat_id, cmd_id)` (byte 0 = `cat_id`, byte 1 = `cmd_id`); each value is either a payload
+`struct`-format string or a handler/type name.
+
+| `(cat_id, cmd_id)` | Value | Kind |
+| --- | --- | --- |
+| `(0, 0)` / `(0, 1)` / `(0, 2)` | `disconn_animation` | handler/type |
+| `(1, 0)` | `<BBB7bHbb` | struct fmt (14 B) |
+| `(1, 2)` | `<BBiffHii` | struct fmt (24 B) |
+| `(1, 5)` | `dev_total_lightsleep_ms` | handler/type |
+| `(1, 6)` | `<BBbbB` | struct fmt (6 B) |
+| `(1, 7)` | `<3Bbb` | struct fmt (5 B) |
+| `(2, 0)` | `dev_info` | handler/type |
+| `(3, 1)` / `(3, 2)` | `device_power` | handler/type |
+| `(7, 0)` | `disabled` | handler/type |
+| `(7, 1)` | `<BBHbffb` | struct fmt (15 B) |
+
+### `struct` format → message bindings — confirmed (for listed)
+
+Each payload format begins with `BB` = the echoed `cat_id`/`cmd_id` header:
+
+| `(cat_id, cmd_id)` | `struct` format | Size |
+| --- | --- | --- |
+| `(1, 0)` | `<BBB7bHbb` | 14 B |
+| `(1, 2)` | `<BBiffHii` | 24 B |
+| `(1, 6)` | `<BBbbB` | 6 B |
+| `(1, 7)` | `<3Bbb` | 5 B |
+| `(7, 1)` | `<BBHbffb` | 15 B |
+
+### `CHUNK_HDR_FMT` — format & field order confirmed
+
+`CHUNK_HDR_FMT = <HBBBiHiB`, `CHUNK_HDR_SZ = 16` bytes — packed by `f_ble/chunking.py`'s
+`gen_transfer_buff` via `struct.pack_into` at buffer offset 2. The format string and field
+order are **confirmed** from the live `pack_into` opcode stream; the `CHUNK_HDR_FMT`
+name-to-value binding is **inferred (high confidence)** — `<HBBBiHiB` is `chunking`'s sole
+struct format and is the value imported elsewhere as `CHUNK_HDR_FMT`, but no literal
+`CHUNK_HDR_FMT = "…"` module-level assignment was seen in the frozen bytecode.
+
+| `struct` code | Field | Type |
+| --- | --- | --- |
+| `H` | `file_id` | uint16 LE |
+| `B` | `status_id` | uint8 |
+| `B` | `action_id` | uint8 |
+| `B` | `file_type_id` | uint8 |
+| `i` | `byte_pos` | int32 LE |
+| `H` | `chunk_no` | uint16 LE |
+| `i` | `file_size` | int32 LE |
+| `B` | *(literal 0, reserved/flags)* | uint8 |
+
+### How it was done
 
 <Steps>
   <Step title="Locate the frozen data">
-    In the image (file offsets): the qstr pool begins near `0xf3d3`; the frozen
-    module-name registry begins near `0x27b00`. The DROM segment maps file `0x18` →
+    In the image (file offsets): `0xf3d3` points *into* the qstr identifier-string data,
+    but mid-pool — the sorted run of identifier strings starts much earlier (around
+    `0xe000`) and flows continuously through `0xf3d3` with no sort reset. The concrete
+    anchors are the frozen qstr pool header at seg0 `0x5de0c` (`prev=0x3f4213d0`,
+    `total_prev_len=1200`, `len=2886`) with its `qstrs[]` pointer array at `0x5de24`. The
+    frozen module-name registry begins near `0x27b00`; the DROM segment maps file `0x18` →
     vaddr `0x3f400020`.
   </Step>
   <Step title="Parse the frozen module table">
-    Reconstruct the MicroPython v1.25 (`.mpy` version 6.3) `mp_raw_code_t` tree for the
-    three comms modules: `espnow_msg.py`, `f_ble/ble_data.py`, `f_ble/chunking.py`.
+    Reconstruct the MicroPython v1.25 (`.mpy` version 6.3) `mp_raw_code_t` tree for the two
+    comms modules that actually carry these constants: `espnow_conn_v2.py` (home of
+    `TOTEM_MSG_MAP` and the per-message `struct`-format registry) and `f_ble/chunking.py`
+    (home of `CHUNK_HDR_FMT`).
   </Step>
   <Step title="Disassemble the bytecode">
-    Walk the bytecode with a v1.25-matched reader (adapt `tools/mpy-tool.py -d` from the
-    MicroPython source). Small integers appear inline as `LOAD_CONST_SMALL_INT`; the
-    `TOTEM_MSG_MAP` dict build and the `CHUNK_HDR_FMT` string literal are then readable.
+    Walk the bytecode with a v1.25-matched reader. Reuse the opcode tables from `py/bc0.h`
+    / `tools/mpy-tool.py`, but note `mpy-tool.py -d` itself only reads standalone `.mpy`
+    blobs; frozen firmware modules (emitted as `proto_fun_*` / `fun_data_*` /
+    `const_qstr_table_data_*` C structs, not `.mpy` blobs) require a custom frozen-aware
+    reader. Small integers `-16..47` load inline as single-byte opcodes `0x80`–`0xAF`;
+    larger ones via `LOAD_CONST_SMALL_INT` (`0x22`, signed var-int) — both embed the value
+    in the bytecode. The `TOTEM_MSG_MAP` dict build and the `CHUNK_HDR_FMT` string literal
+    are then readable.
   </Step>
   <Step title="Cross-check">
-    Validate recovered `(cat_id, cmd_id)` values against the confirmed pairs
-    (`0x01/0x02`, `0x03/0x01`, `0x06/0x07`) already visible in the logs.
+    Validate recovered `(cat_id, cmd_id)` values against the pairs already visible in the
+    logs. `(0x01, 0x02)` and `(0x03, 0x01)` validate directly against `TOTEM_MSG_MAP`.
+    `(0x06, 0x07)` is a Peer-Sync BLE control frame handled outside `TOTEM_MSG_MAP`, so
+    `cat 6` is absent from the map — its absence is expected, not a failed cross-check.
   </Step>
 </Steps>
 

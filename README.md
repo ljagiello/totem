@@ -7,7 +7,7 @@ firmware image and the companion mobile app. Not affiliated with or endorsed by 
 ## Key findings
 
 - The device is an **ESP32** (Xtensa LX6) running **MicroPython v1.25.0** on **ESP-IDF v5.4**.
-- Totem's application is **Python**, frozen into the image as bytecode across **98 modules**.
+- Totem's application is **Python**, frozen into the image as bytecode across **96 frozen modules** (plus 2 non-frozen on-flash `.py` files, so tallies of 98 also appear).
 - Three radios share the 2.4 GHz band: **BLE** (phone app), **ESP-NOW** ("Unity Mesh",
   Totem-to-Totem), and **WiFi** (hotspot OTA).
 - Application messages use a shared `(cat_id, cmd_id)` model with a common chunking layer.

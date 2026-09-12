@@ -1,0 +1,152 @@
+---
+title: "Module reference"
+description: "All 98 frozen MicroPython modules in the v5.0.2 image, with inferred roles."
+---
+
+Every module below is frozen into the firmware. Names are exact (from the frozen module
+registry); roles are inferred from symbols, string constants, and log lines.
+
+## Top-level application
+
+| Module | Role |
+| --- | --- |
+| `main.py` | application entry after boot |
+| `project_main.py` | project-specific top-level orchestration |
+| `project_data.py` | project constants / configuration data |
+| `compass.py` | top-level compass state machine |
+| `compassing.py` | compass math (heading, 2D/3D, bias) |
+| `new_vibe.py` | Vibe Mode passive calibration |
+| `chat_msg.py` | peer-to-peer chat messages |
+| `stats.py` | runtime statistics |
+| `debugger.py` | on-device debug hooks |
+| `demi_god.py` | privileged broadcast command system |
+
+## Boot & filesystem
+
+| Module | Role |
+| --- | --- |
+| `_boot.py` | first script run at MicroPython start |
+| `inisetup.py` | first-boot filesystem setup |
+| `flashbdev.py` | flash block device for the VFS |
+
+## Navigation
+
+| Module | Role |
+| --- | --- |
+| `ubx_gnss.py` | u-blox UBX GNSS driver |
+| `nav_helpers.py` | navigation math helpers |
+| `nav_logger.py` | navigation event logging |
+| `imu_fusion.py` | accel/gyro sensor fusion |
+| `imu_fusion_auto.py` | automatic fusion mode selection |
+| `mag_wmm_data.py` | World Magnetic Model data |
+| `task_mag_declination.py` | periodic declination recompute |
+
+## LEDs
+
+| Module | Role |
+| --- | --- |
+| `leds.py` | LED behavior / status mapping |
+| `animations.py` | animation definitions |
+| `apa106.py` | APA106 addressable-LED driver |
+| `neopixel.py` | NeoPixel-style driver shim |
+
+## Input & sensors
+
+| Module | Role |
+| --- | --- |
+| `button.py` | SOS/physical button (`AsyncButton`) |
+| `touch_button_v2.py` | capacitive Touch Crystal |
+| `io_mgr.py` | GPIO / IO management |
+| `peripherals.py` | peripheral bring-up |
+| `ds18x20.py` | DS18B20 temperature sensor |
+| `onewire.py` | 1-Wire bus |
+
+## Bluetooth LE
+
+| Module | Role |
+| --- | --- |
+| `ble_controller.py` | high-level BLE control (`BleCtrl`, blockers) |
+| `ble_core.py` | core BLE glue |
+| `ble_manager.py` | connection/session manager |
+| `svc_ble_transfer.py` | chunked transfer GATT service |
+| `ota_ble.py` | OTA over BLE |
+
+## ESP-NOW mesh & peers
+
+| Module | Role |
+| --- | --- |
+| `espnow.py` | ESP-NOW wrapper |
+| `espnow_conn_v2.py` | connection/session layer |
+| `espnow_msg.py` | message model (`cat_id`/`cmd_id`, `TOTEM_MSG_MAP`) |
+| `aioespnow.py` | asyncio ESP-NOW (`AIOESPNow`) |
+| `peer_auto_bond.py` | automatic peer bonding |
+| `peer_helpers.py` | peer utilities |
+| `peer_management.py` | peer registry / lifecycle |
+
+## Upload & OTA
+
+| Module | Role |
+| --- | --- |
+| `data_upload_v2.py` | app data upload (`send_data_v2`) |
+| `ota_block_writer.py` | write image chunks to the OTA slot |
+| `ota_callback.py` | OTA progress/state callbacks |
+| `ota_daemon.py` | background OTA task |
+
+## Power & system
+
+| Module | Role |
+| --- | --- |
+| `device_power.py` | power state machine, battery health |
+| `wdt_manager.py` | watchdog management |
+| `event_manager.py` | pub/sub event bus |
+
+## `f_ble/` package
+
+| Module | Role |
+| --- | --- |
+| `f_ble/__init__.py` | package init |
+| `f_ble/peripheral.py` | GATT peripheral + advertising |
+| `f_ble/ble_lite.py` | lightweight message model |
+| `f_ble/ble_data.py` | message (de)serialization |
+| `f_ble/chunking.py` | payload fragmentation (`CHUNK_HDR_FMT`) |
+| `f_ble/file_upload.py` | resumable chunked file transfer |
+
+## `f_ota/` package
+
+| Module | Role |
+| --- | --- |
+| `f_ota/__init__.py` | package init |
+| `f_ota/main.py` | OTA orchestration |
+| `f_ota/hotspot.py` | WiFi hotspot updater |
+| `f_ota/install_ota.py` | write + activate new slot |
+| `f_ota/config.py` | OTA configuration |
+| `f_ota/system.py` | system helpers |
+| `f_ota/f_assets.py` | asset fetch/apply |
+
+## `f_lib/` package
+
+| Module | Role |
+| --- | --- |
+| `f_lib/__init__.py` | package init |
+| `f_lib/wifi.py`, `f_lib/wifi_v2.py` | WiFi station/AP control |
+| `f_lib/requests.py` | HTTP client |
+| `f_lib/task_mgr.py` | asyncio task manager |
+| `f_lib/async_helpers.py` | async utilities |
+| `f_lib/generators.py` | generator helpers |
+| `f_lib/rtc_mem.py`, `f_lib/rtc_v2.py` | RTC-retained memory |
+| `f_lib/file_mgr.py` | file management |
+| `f_lib/gzip.py`, `f_lib/tarfile.py`, `f_lib/unpack.py` | archive handling for `.tgz` OTA |
+| `f_lib/firmware_ota.py` | OTA slot writing |
+| `f_lib/firmware_rollback.py` | rollback logic |
+| `f_lib/firmware_helpers.py` | firmware helpers |
+| `f_lib/neopixel_v2.py` | LED driver v2 |
+| `f_lib/bitwise.py` | bit manipulation |
+| `f_lib/helpers.py` | misc utilities |
+| `f_lib/logger.py` | structured logging |
+
+## Standard / vendored MicroPython
+
+Frozen library modules that ship with or are vendored into MicroPython, not Totem-specific:
+`asyncio/` (`__init__`, `core`, `event`, `funcs`, `lock`, `stream`), `uasyncio.py`,
+`requests/__init__.py`, `urequests.py`, `mip/__init__.py`, `ssl.py`, `upysh.py`,
+`webrepl.py`, `webrepl_setup.py`, `neopixel.py`.

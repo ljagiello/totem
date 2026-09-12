@@ -1,0 +1,75 @@
+---
+title: "2.4 GHz protocols overview"
+description: "The three radios that share the 2.4 GHz band and how completely each is captured."
+---
+
+The Totem Compass uses the ESP32's single 2.4 GHz radio in three roles. They are
+time-multiplexed by the WiFi/BT coexistence layer, never simultaneously active in a way
+that conflicts on-air.
+
+<CardGroup cols={3}>
+  <Card title="BLE" icon="bluetooth" href="/protocols/ble">
+    Phone app ↔ Totem. GATT peripheral, chunked transfer, `(cat_id, cmd_id)` messages.
+  </Card>
+  <Card title="ESP-NOW mesh" icon="diagram-project" href="/protocols/espnow-mesh">
+    Totem ↔ Totem "Unity Mesh". Peer bonding, sync, relay, encryption.
+  </Card>
+  <Card title="WiFi" icon="wifi" href="/protocols/wifi-ota">
+    Hotspot OTA. Joins `totemupdate`, downloads firmware over HTTP.
+  </Card>
+</CardGroup>
+
+## One message model across radios
+
+The most important protocol finding: BLE and the mesh share a **single application
+message model**. Every message is addressed by a two-byte tuple:
+
+```text
+(cat_id, cmd_id)   +   payload
+ │        │
+ │        └── command within the category
+ └── category (Static Data, Live Data, Peer, …)
+```
+
+The BLE link logs it directly — `[BLE] DataXfer cat_id: {} | cmd_id: {}` and
+`Conn Status Update | cat_id: {} | cmd_id: {}` — and the same categories drive peer
+sync over ESP-NOW. Large payloads are fragmented by a common **chunking** layer. The
+full model is on the [message format](/protocols/message-format) page.
+
+## Capture completeness
+
+This table is the direct answer to "is the 2.4 GHz protocol fully captured?" It grades
+each element by how firmly the firmware binary supports it.
+
+| Element | Status | Basis |
+| --- | --- | --- |
+| Radios / transports (BLE, ESP-NOW, WiFi) | ✅ Confirmed | module set, IDF error strings, log lines |
+| Message addressing `(cat_id, cmd_id)` | ✅ Confirmed | `[BLE] DataXfer cat_id/cmd_id`, `ConnStatus` logs |
+| Category values 0x01 / 0x03 / 0x06 | ✅ Confirmed | `DataTransfer (0x01,0x02)` Static, `(0x03,0x01)` Live, `(0x06,0x07)` Peer Sync |
+| Category taxonomy (Static/Live/Peer/Conn/OTA/WiFi/Options/DemiGod) | ✅ Confirmed | `*_cmd_id` symbols + ACK log lines |
+| GATT service & characteristic UUIDs | ✅ Confirmed | literal UUID strings in rodata |
+| BLE connection handshake (ConnStatus Ready, half-duplex, handoff) | ✅ Confirmed | `send_data_v2` log lines |
+| Chunking / file-transfer semantics (file_id, chunk_no, resume, ACK) | ✅ Confirmed | `[Upload]` + `Chunk No:` log lines |
+| ESP-NOW encryption (PMK/LMK) & relay | ✅ Confirmed | IDF espnow error strings, `_relay_frame` |
+| Demi-god broadcast command set | ✅ Confirmed | `demigod_gen_*` symbols |
+| Wire struct layouts (catalog of `struct` formats) | ✅ Confirmed | format strings in rodata |
+| **Exact `cmd_id` enumeration per category** | ⚠️ Partial | some pairs confirmed; full map (`TOTEM_MSG_MAP`) is in bytecode |
+| **Which `struct` format binds to which message** | ⚠️ Partial | all formats recovered; binding needs bytecode |
+| **`CHUNK_HDR_FMT` exact field order** | ⚠️ Partial | constant name known; value is a bytecode literal |
+
+<Note>
+**Verdict.** The protocol's transport, addressing scheme, category taxonomy, GATT
+identifiers, connection state machine, chunking/file-transfer, mesh encryption, and the
+demi-god command set are **fully captured**. What remains are exact numeric values that
+exist only inside frozen MicroPython bytecode: the complete per-category `cmd_id` list,
+the precise `struct`-to-message binding, and the byte order of `CHUNK_HDR_FMT`. These
+are recoverable by disassembling three modules (`f_ble/ble_data.py`, `f_ble/chunking.py`,
+`espnow_msg.py`) — see [methodology](/reference/methodology).
+</Note>
+
+## Coexistence
+
+ESP-IDF's WiFi/BT coexistence arbitrates the radio. The mesh runs on a fixed home
+channel; a peer whose channel differs is rejected (`Peer channel is not equal to the
+home channel, send fail!`). During a hotspot OTA the device is a WiFi station on the
+phone's channel, and BLE/mesh traffic is suspended for the duration of the download.

@@ -1,0 +1,99 @@
+---
+title: "Methodology & next steps"
+description: "How this firmware was analyzed, the tools used, and how to close the remaining gaps."
+---
+
+## Approach
+
+Everything here comes from **static analysis** of two public artifacts: the firmware
+image and the companion Android app. No code was run on a device; no network service was
+attacked. The releases API and S3 objects are served openly.
+
+### Tools
+
+| Tool | Use |
+| --- | --- |
+| `esptool` | parse the ESP-IDF image header, segments, and app descriptor |
+| Python + `struct` | parse headers, carve segments, read the `esp_app_desc_t` |
+| `capstone` 6.0 (`CS_ARCH_XTENSA`) | disassemble the native Xtensa code |
+| `rizin` / `rabin2` | validate the rebuilt ELF |
+| `strings` + `grep` | recover the qstr symbol table and string constants |
+| `hermes-dec` | decompile the Android app's Hermes bytecode (for the download URL) |
+
+### Steps
+
+<Steps>
+  <Step title="Parse the image">
+    Confirm ESP32, 7 segments, entry point, and read the app descriptor
+    (IDF v5.4, build date, ELF hash).
+  </Step>
+  <Step title="Rebuild an ELF">
+    Map the 7 segments to their load addresses with correct R/W/X perms in an
+    `EM_XTENSA` ELF for Ghidra/IDA/rizin.
+  </Step>
+  <Step title="Identify the runtime">
+    Native strings reveal MicroPython v1.25.0 — the app is Python, frozen as bytecode.
+  </Step>
+  <Step title="Recover the symbol table">
+    Extract the qstr pool (2,479 identifiers) and rodata strings (11,857) — the
+    application's method/attribute/class names and every log line.
+  </Step>
+  <Step title="Reconstruct behavior">
+    Map modules, classes, protocol categories, and subsystem behavior from those symbols
+    and the `{}`-style (Python `str.format`) log messages.
+  </Step>
+</Steps>
+
+## Why not a full source decompile?
+
+The application is **frozen MicroPython bytecode**. Unlike CPython (which has mature
+decompilers such as `uncompyle6`/`decompyle3`), MicroPython has **no mature
+bytecode-to-source decompiler**. The best available is *bytecode disassembly* (opcodes
+plus qstr references), not clean Python source.
+
+However, the frozen format keeps **every identifier as an interned string** (qstr) and
+retains all string literals. That symbol table plus the log messages reconstruct each
+module's behavior at close to source fidelity — which is how this documentation was
+built.
+
+## Closing the remaining gaps
+
+Three items are graded "needs bytecode disassembly" in the
+[protocol completeness matrix](/protocols/overview):
+
+1. The complete per-category `cmd_id` enumeration (`TOTEM_MSG_MAP`).
+2. The exact binding of each `struct` format to a specific message.
+3. The field order of `CHUNK_HDR_FMT`.
+
+To recover them:
+
+<Steps>
+  <Step title="Locate the frozen data">
+    In the image (file offsets): the qstr pool begins near `0xf3d3`; the frozen
+    module-name registry begins near `0x27b00`. The DROM segment maps file `0x18` →
+    vaddr `0x3f400020`.
+  </Step>
+  <Step title="Parse the frozen module table">
+    Reconstruct the MicroPython v1.25 (`.mpy` version 6.3) `mp_raw_code_t` tree for the
+    three comms modules: `espnow_msg.py`, `f_ble/ble_data.py`, `f_ble/chunking.py`.
+  </Step>
+  <Step title="Disassemble the bytecode">
+    Walk the bytecode with a v1.25-matched reader (adapt `tools/mpy-tool.py -d` from the
+    MicroPython source). Small integers appear inline as `LOAD_CONST_SMALL_INT`; the
+    `TOTEM_MSG_MAP` dict build and the `CHUNK_HDR_FMT` string literal are then readable.
+  </Step>
+  <Step title="Cross-check">
+    Validate recovered `(cat_id, cmd_id)` values against the confirmed pairs
+    (`0x01/0x02`, `0x03/0x01`, `0x06/0x07`) already visible in the logs.
+  </Step>
+</Steps>
+
+An alternative dynamic approach — running the exact MicroPython build under an ESP32
+emulator or on hardware and dumping `TOTEM_MSG_MAP` / `CHUNK_HDR_FMT` from a REPL — would
+yield the same values faster if a device or matching build is available.
+
+## Artifacts
+
+The reverse-engineering scratch (rebuilt ELF, extracted symbol/string tables, carved
+segments) is kept out of git via `.gitignore`. Regenerate it from the image with the
+steps above; this `docs/` tree is the durable record.

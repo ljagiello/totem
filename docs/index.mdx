@@ -1,0 +1,76 @@
+---
+title: "Totem Compass Firmware"
+description: "Reverse-engineering documentation for the Totem Compass ESP32 firmware, version 5.0.2."
+---
+
+<Note>
+This is independent, unofficial reverse-engineering documentation produced by static
+analysis of a publicly downloadable firmware image. It is not affiliated with or
+endorsed by Totem Labs. No code was executed on a device and no services were attacked;
+all findings come from reading the firmware binary and the companion mobile app.
+</Note>
+
+## What this documents
+
+The **Totem Compass** is a festival navigation and social device: a handheld puck with
+a ring of addressable LEDs (the "halo"), a capacitive "Touch Crystal", a GNSS receiver,
+an IMU, and three 2.4 GHz radios. Groups of Totems bond into a mesh so friends can find
+each other, send taps and messages, and navigate to a shared point.
+
+This site documents firmware **v5.0.2** at the level recoverable from the binary:
+
+- The firmware is an **ESP32** application built on **ESP-IDF v5.4**.
+- The device runs **MicroPython v1.25.0**; all of Totem's own logic is **Python**,
+  frozen into the image as compiled bytecode across **98 modules**.
+- Three radios share the 2.4 GHz band: **BLE** (phone app), **ESP-NOW** (Totem-to-Totem
+  "Unity Mesh"), and **WiFi** (hotspot OTA updates).
+
+<CardGroup cols={2}>
+  <Card title="Firmware architecture" icon="microchip" href="/firmware/architecture">
+    MicroPython app layout, the 98 frozen modules, and how they fit together.
+  </Card>
+  <Card title="2.4 GHz protocols" icon="tower-broadcast" href="/protocols/overview">
+    BLE, ESP-NOW mesh, WiFi OTA — message format, categories, and framing.
+  </Card>
+  <Card title="Navigation stack" icon="location-crosshairs" href="/subsystems/navigation">
+    u-blox GNSS, AssistNow, IMU fusion, and World Magnetic Model declination.
+  </Card>
+  <Card title="OTA & download URL" icon="download" href="/reference/download-url">
+    How updates are fetched and how the firmware URL is constructed.
+  </Card>
+</CardGroup>
+
+## Firmware at a glance
+
+| Property | Value |
+| --- | --- |
+| Product | Totem Compass |
+| Version | 5.0.2 (release id 335, S3 branch `totem`) |
+| SoC | ESP32 (original), Xtensa LX6 dual-core, chip id 0 |
+| Framework | ESP-IDF v5.4 (`-dirty`) |
+| Runtime | MicroPython v1.25.0 |
+| Build date | Aug 27 2026, 15:08:47 |
+| Image size | 1,692,352 bytes |
+| SHA-256 | `a6d05597f0f88f64313ba512287f89af25b9c31e2cd80dc85c8cf426c7bf8896` |
+| Flash | 4 MB, DIO @ 40 MHz |
+| Segments | 7 (see [memory map](/firmware/memory-map)) |
+
+## How to read this documentation
+
+Findings are graded by how directly the binary supports them:
+
+<AccordionGroup>
+  <Accordion title="Confirmed" icon="circle-check">
+    Directly present in the image: version strings, module names, GATT UUIDs,
+    struct/format strings, log messages, and the observed `(cat_id, cmd_id)` pairs.
+  </Accordion>
+  <Accordion title="Inferred" icon="circle-half-stroke">
+    Strongly implied by symbol names and log text but assembled by the analyst
+    (for example, the role of a module or the meaning of a command namespace).
+  </Accordion>
+  <Accordion title="Needs bytecode disassembly" icon="circle-question">
+    Exact numeric values that live only inside frozen bytecode — the complete
+    `cmd_id` enumeration and the precise binding of each `struct` format to a message.
+    See [methodology](/reference/methodology) for how to close these gaps.
+  </Accordion>
+</AccordionGroup>

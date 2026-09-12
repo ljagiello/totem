@@ -1,0 +1,14 @@
+# Firmware binaries and reverse-engineering scratch (not source)
+*.bin
+*.elf
+*.xapk
+*.apk
+re/seg*.bin
+re/*.elf
+re/hbc_*.txt
+re/qstr_symbols.txt
+re/rodata_strings.txt
+/tmp/
+
+# Reverse-engineering scratch directory
+re/

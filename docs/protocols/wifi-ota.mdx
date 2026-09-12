@@ -1,0 +1,71 @@
+---
+title: "WiFi (hotspot OTA)"
+description: "The third 2.4 GHz role: joining a phone hotspot to download firmware over HTTP."
+---
+
+WiFi is used almost exclusively for **over-the-air updates** when the Bluetooth path is
+unavailable (for example, when the device is on firmware older than the app supports).
+Driven by `f_lib/wifi.py` / `wifi_v2.py`, `f_ota/hotspot.py`, and `f_lib/requests.py`.
+
+## The hotspot method
+
+The device joins a **phone personal hotspot** configured with fixed credentials, then
+pulls the update over plain HTTP.
+
+| Parameter | Value |
+| --- | --- |
+| SSID | `totemupdate` |
+| Password | `totem1234` |
+| Band | 2.4 GHz (iOS "Maximize Compatibility", Android "Compatibility Mode") |
+| Trigger | triple-click the SOS button while powered on |
+
+<Steps>
+  <Step title="Enter update mode">
+    Triple-click SOS. The device reboots into the hotspot updater and shows a
+    "searching for WiFi" halo animation (`anim_gnss_search`-style states).
+  </Step>
+  <Step title="Join totemupdate">
+    Station mode connects to the `totemupdate` SSID on 2.4 GHz (`conn_to_wifi`).
+    A pink spinning animation indicates it cannot find/join the hotspot.
+  </Step>
+  <Step title="Download firmware">
+    Over HTTP via `f_lib/requests.py`, streaming into the inactive OTA slot
+    (`ota_block_writer.py`). White progress ring = downloading.
+  </Step>
+  <Step title="Verify & reboot">
+    Image hash is checked; on success the ring fills white and the device reboots into
+    the new slot. On failure the outer ring blinks orange and it reverts.
+  </Step>
+</Steps>
+
+## Where the firmware comes from
+
+The device (and the phone app) fetch release metadata from the Totem API and download
+the image from S3. The URL is built deterministically — see
+[download URL](/reference/download-url) for the exact construction. For v5.0.2:
+
+```text
+https://datapeak-developer.s3.us-east-1.amazonaws.com/totem_compass/totem/5.0.2/firmware_v5.0.2.bin
+```
+
+The device-side endpoints are templated as `{base}/devices/{mac}/ota` and
+`{base}/devices/{mac}/ota?updated`.
+
+## Transport security
+
+<Warning>
+The observed OTA download URLs use **HTTP**, not HTTPS
+(`http://datapeak-developer.s3.us-east-1.amazonaws.com/{}`,
+`http://api.totemportal.com`). Integrity therefore rests on the **image-level checks**
+(appended SHA-256 and the ESP-IDF OTA validation / rollback), not on TLS. The mbedTLS
+stack is compiled in and used elsewhere, but the update fetch itself was seen over
+cleartext. Whether the image is additionally signature-verified (ECDSA) at install time
+is not determinable from strings alone.
+</Warning>
+
+## WiFi capabilities present
+
+Beyond the hotspot updater, the WiFi driver exposes standard station/AP features
+(scan, connect, protocol/tx-power control — `WLAN settings changed to (pwr, proto,
+txpower)`). These share the single 2.4 GHz radio with BLE and ESP-NOW and are not used
+during normal navigation, only for updates and any cloud sync.

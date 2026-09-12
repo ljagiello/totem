@@ -1,0 +1,48 @@
+---
+title: "Memory map"
+description: "The seven segments of the ESP32 application image and their load addresses."
+---
+
+## Segments
+
+The image contains seven segments. Executable code lives in IROM (flash-mapped) and
+IRAM; constants and the frozen Python bytecode live in DROM.
+
+| Seg | Load address | Size (bytes) | Region | Perms | Contents |
+| --- | --- | --- | --- | --- | --- |
+| 0 | `0x3f400020` | 448,836 | DROM | R | rodata: qstr pool, string constants, **frozen Python bytecode** |
+| 1 | `0x3ff80060` | 28 | RTC slow | RW | RTC-retained data |
+| 2 | `0x3ffbdb60` | 9,864 | DRAM | RW | initialized data |
+| 3 | `0x400d0020` | 1,108,228 | IROM | R-X | MicroPython VM + ESP-IDF code |
+| 4 | `0x3ffc01e8` | 13,384 | DRAM | RW | initialized data |
+| 5 | `0x40080000` | 111,788 | IRAM | RWX | time-critical code, ISRs |
+| 6 | `0x400c0000` | 96 | RTC fast | RWX | RTC-retained code |
+
+Entry point is `0x40081144`, in IRAM (segment 5). The disassembled prologue is the
+standard ESP32 startup (`entry`, load of the exception `vecbase`, then into the IDF
+`call_start_cpu0` path).
+
+## ESP32 address regions (reference)
+
+| Range | Region | Use |
+| --- | --- | --- |
+| `0x3f400000`–`0x3f800000` | DROM | flash-mapped constant data |
+| `0x3ff80000`–`0x3ff82000` | RTC slow | retained across deep sleep |
+| `0x3ffae000`–`0x40000000` | DRAM | data / heap |
+| `0x40070000`–`0x400a0000` | IRAM | instruction RAM |
+| `0x400c0000`–`0x400c2000` | RTC fast | retained code/data |
+| `0x400d0000`–`0x40400000` | IROM | flash-mapped instructions |
+
+## Rebuilt ELF
+
+For analysis, the seven segments are reassembled into an `EM_XTENSA` ELF with each
+segment placed at its real load address and correct R/W/X permissions. That ELF loads
+directly into Ghidra (with an Xtensa processor module) or IDA. Capstone 6.0
+(`CS_ARCH_XTENSA`) also disassembles the code segments directly. See
+[methodology](/reference/methodology).
+
+<Warning>
+Analyzing the native ELF reveals the **MicroPython interpreter**, not Totem's logic.
+The application behavior lives in the frozen bytecode inside segment 0 (DROM). Use the
+recovered symbol table and string constants to understand the Python layer.
+</Warning>

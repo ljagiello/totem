@@ -1,0 +1,83 @@
+---
+title: "Firmware download URL & API"
+description: "How the release API and S3 download URL are constructed, recovered from the mobile app."
+---
+
+The firmware image analyzed here is publicly downloadable. The URL is built
+deterministically from release metadata. This was recovered by decompiling the Android
+app's Hermes bytecode (functions `getS3FirmwareUrl` and `getFileName`).
+
+## Release API
+
+The app fetches release metadata from:
+
+```text
+https://api.totemportal.com/releases
+```
+
+Response (abridged) at time of analysis:
+
+```json
+{
+  "body": {
+    "releases": {
+      "335": {
+        "release_id": "335",
+        "s3_bucket": "datapeak-developer",
+        "s3_product_dir": "totem_compass",
+        "s3_branch_dir": "totem",
+        "release_code": "5.0.2",
+        "size_bytes": "1692352",
+        "sha256_hash": "a6d05597f0f88f64313ba512287f89af25b9c31e2cd80dc85c8cf426c7bf8896"
+      },
+      "240": {
+        "release_code": "3.2.12",
+        "s3_branch_dir": "pre_alpha",
+        "...": "..."
+      }
+    }
+  }
+}
+```
+
+Device-side OTA endpoints are templated as `{base}/devices/{mac}/ota` and
+`{base}/devices/{mac}/ota?updated`.
+
+## URL construction
+
+```text
+filename = "firmware_v" + release_code + ".bin"
+
+url = "https://" + s3_bucket + ".s3.us-east-1.amazonaws.com/"
+      + s3_product_dir + "/"
+      + s3_branch_dir + "/"
+      + release_code + "/"
+      + filename
+```
+
+For release 335 (v5.0.2):
+
+```text
+https://datapeak-developer.s3.us-east-1.amazonaws.com/totem_compass/totem/5.0.2/firmware_v5.0.2.bin
+```
+
+The construction order was confirmed from the raw Hermes opcodes (a `HermesInternal.concat`
+call of exactly ten operands ending in the filename), not only the decompiler output.
+
+## Verification
+
+The downloaded object matched the API's own integrity fields exactly:
+
+| Field | API value | Downloaded file |
+| --- | --- | --- |
+| Size | 1,692,352 B | 1,692,352 B |
+| SHA-256 | `a6d05597…c7bf8896` | `a6d05597…c7bf8896` |
+
+The image begins with `0xE9` and carries the ESP-IDF app-descriptor magic `0xABCD5432`,
+confirming a genuine ESP32 application image.
+
+<Note>
+The bucket path has no versioned prefix, so the same URL keeps returning 5.0.2 until the
+object is replaced. Release metadata (including the `pre_alpha` branch) is served openly
+by the releases API.
+</Note>

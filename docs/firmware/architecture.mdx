@@ -1,0 +1,105 @@
+---
+title: "Application architecture"
+description: "The MicroPython application: 98 frozen modules and how they are layered."
+---
+
+## Layered view
+
+Totem's firmware is a MicroPython application organized into a small number of
+packages plus a set of top-level modules. From the bottom up:
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  Application    compass.py · compassing.py · main.py          │
+│                 project_main.py · new_vibe.py · chat_msg.py    │
+├─────────────────────────────────────────────────────────────┤
+│  Comms          f_ble/ (BLE)   espnow*/peer* (ESP-NOW mesh)    │
+│                 data_upload_v2 · svc_ble_transfer · ota_ble    │
+├─────────────────────────────────────────────────────────────┤
+│  Sense & act    ubx_gnss · imu_fusion · mag_wmm_data           │
+│                 leds · animations · apa106 · touch_button_v2    │
+│                 button · device_power · ds18x20 · io_mgr        │
+├─────────────────────────────────────────────────────────────┤
+│  Platform lib   f_lib/ (wifi, requests, task_mgr, rtc, gzip,   │
+│                 tarfile, logger, file_mgr, firmware_ota…)       │
+├─────────────────────────────────────────────────────────────┤
+│  Runtime        MicroPython v1.25.0 · asyncio · espnow · ble    │
+│                 (native, on ESP-IDF v5.4)                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Packages
+
+### `f_lib/` — platform library
+
+Reusable infrastructure used by everything above it.
+
+| Module | Role |
+| --- | --- |
+| `wifi.py`, `wifi_v2.py` | station/AP control, connect, scan |
+| `requests.py` | HTTP client (used by OTA and cloud sync) |
+| `task_mgr.py`, `async_helpers.py`, `generators.py` | asyncio task orchestration |
+| `event_manager.py` (top-level) | pub/sub event bus (`evt_*` events) |
+| `rtc_mem.py`, `rtc_v2.py` | data retained across deep sleep in RTC memory |
+| `file_mgr.py`, `gzip.py`, `tarfile.py`, `unpack.py` | file + archive handling for `.tgz` OTA packages |
+| `firmware_ota.py`, `firmware_rollback.py`, `firmware_helpers.py` | OTA slot write + rollback |
+| `neopixel_v2.py` | addressable-LED driver |
+| `bitwise.py`, `helpers.py`, `logger.py` | utilities and structured logging |
+
+### `f_ble/` — Bluetooth LE
+
+| Module | Role |
+| --- | --- |
+| `peripheral.py` | GATT peripheral, advertising, connection lifecycle |
+| `ble_lite.py`, `ble_data.py` | message model: `(cat_id, cmd_id)` + payload |
+| `chunking.py` | fragmenting large payloads over the MTU into chunks |
+| `file_upload.py` | chunked file transfer with resume/ACK |
+
+### `f_ota/` — update engine
+
+| Module | Role |
+| --- | --- |
+| `main.py` | OTA orchestration |
+| `hotspot.py` | phone-hotspot update flow (`totemupdate` SSID) |
+| `install_ota.py` | write + activate the new slot |
+| `config.py`, `system.py`, `f_assets.py` | update config, system helpers, asset fetch |
+
+## Top-level modules by subsystem
+
+<Tabs>
+  <Tab title="Compass & nav">
+    `compass.py`, `compassing.py`, `ubx_gnss.py`, `nav_helpers.py`, `nav_logger.py`,
+    `imu_fusion.py`, `imu_fusion_auto.py`, `mag_wmm_data.py`, `task_mag_declination.py`
+  </Tab>
+  <Tab title="LEDs">
+    `leds.py`, `animations.py`, `neopixel.py`, `apa106.py`, `f_lib/neopixel_v2.py`
+  </Tab>
+  <Tab title="Input & sensors">
+    `button.py`, `touch_button_v2.py`, `io_mgr.py`, `peripherals.py`,
+    `ds18x20.py`, `onewire.py`, `new_vibe.py`
+  </Tab>
+  <Tab title="Mesh & peers">
+    `espnow.py`, `espnow_conn_v2.py`, `espnow_msg.py`, `aioespnow.py`,
+    `peer_auto_bond.py`, `peer_helpers.py`, `peer_management.py`
+  </Tab>
+  <Tab title="Comms & upload">
+    `ble_controller.py`, `ble_core.py`, `ble_manager.py`, `svc_ble_transfer.py`,
+    `data_upload_v2.py`, `ota_ble.py`, `ota_block_writer.py`, `ota_callback.py`,
+    `ota_daemon.py`, `chat_msg.py`
+  </Tab>
+  <Tab title="Power & system">
+    `device_power.py`, `wdt_manager.py`, `stats.py`, `debugger.py`,
+    `demi_god.py`, `flashbdev.py`, `inisetup.py`, `webrepl.py`, `mip/`
+  </Tab>
+</Tabs>
+
+The full list with one-line descriptions is on the [module reference](/reference/modules).
+
+## Concurrency model
+
+The application is **asyncio-based**. `f_lib/task_mgr.py` and the frozen `asyncio`
+package schedule long-running coroutines (BLE service loop, mesh outbox drain, GNSS
+polling, LED animation ticks, background checks). Log lines such as
+`task started, waiting on enable events` and `task cancelled` show tasks gated by
+events from the `event_manager` bus, so subsystems can be paused and resumed (for
+example, LEDs and radios are suspended during light sleep to save power).

@@ -1,0 +1,59 @@
+---
+title: "LEDs & animations"
+description: "The halo ring and Touch Crystal: APA106 driver, animation set, and status colors."
+---
+
+The Totem's visible output is a ring of addressable RGB LEDs (the **halo**) plus the
+**Touch Crystal**. Driven by `apa106.py` / `neopixel.py` / `f_lib/neopixel_v2.py`, with
+behavior in `leds.py` and `animations.py`.
+
+## Driver
+
+| Element | Evidence |
+| --- | --- |
+| LED type | **APA106** (`APA106`, `apa106.py`) — WS2812-like, single-wire |
+| Transport | RMT bit-stream (`bitstream_channel`) |
+| Pixel count | `CRYSTAL_PX_COUNT` |
+| Palette | `COLOR_LIST`, `Colors`, `CLEAR` |
+| Controller | `DeviceLeds`, `_ring_leds`, `_write_lvl`, `_spin_deg` (rotational effects) |
+
+APA106 is driven via the ESP32 RMT peripheral as a precise bit-stream, the standard
+technique for these single-wire addressable LEDs.
+
+## Animation set
+
+Animations are event-driven — subsystems raise events and the LED task plays the
+matching effect:
+
+| Animation | Trigger |
+| --- | --- |
+| `anim_gnss_search` | acquiring a GNSS fix |
+| `anim_add_peer`, `add_peer_animation` | a new Totem bonded |
+| `anim_bonding_ctdwn` | bonding countdown |
+| `anim_peer_del_ctdwn` | peer removal countdown |
+| `demi_god_blink`, `demi_god_countdown` | a [demi-god](/protocols/demigod) command landed |
+| downloading / progress ring | OTA in progress (white progress ring) |
+| spin / rotation (`_spin_deg`, `Dial rotation`) | dial/heading feedback |
+
+The compass heading itself is rendered as a lit point on the ring that rotates to point
+toward the target (`_spin_deg`, `Dial rotation cancelled`).
+
+## Status colors
+
+The Touch Crystal color on power-up encodes the **software version** — the identification
+method in the official update guide. For this build:
+
+| Version | Crystal color |
+| --- | --- |
+| 5.0 | Sparkly Pink |
+| (earlier) | other colors per release |
+
+OTA/update states also map to ring colors: white progress ring while downloading, a
+full white fill on success, a pink spinning animation when the hotspot can't be reached,
+and an orange blink on update failure (matching the [WiFi OTA](/protocols/wifi-ota)
+flow).
+
+## Power interaction
+
+LEDs are one of the largest current draws, so the LED task is gated by power state and
+suspended during light sleep. Brightness/behavior also changes in low-battery mode.

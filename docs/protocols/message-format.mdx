@@ -1,0 +1,130 @@
+---
+title: "Message format"
+description: "The shared (cat_id, cmd_id) message model, chunking, file transfer, and the struct catalog."
+---
+
+## Addressing: `(cat_id, cmd_id)`
+
+Every application message carries a one-byte **category** and a one-byte **command**.
+This tuple is used identically on the BLE link and for peer sync over the mesh.
+
+```text
+┌────────┬────────┬───────────────────────────┐
+│ cat_id │ cmd_id │ payload (struct-packed)   │
+│ 1 byte │ 1 byte │ variable                  │
+└────────┴────────┴───────────────────────────┘
+```
+
+Evidence: `[BLE] DataXfer cat_id: {} | cmd_id: {}`,
+`[BLE] ConnStatus cat_id: {} | cmd_id: {} | len: {}`,
+`A cmd_id must be provided for demi-god messages`.
+
+## Categories
+
+Confirmed `(cat_id, cmd_id)` pairs and their labels, taken directly from the
+`send_data_v2` transmit logs:
+
+| cat_id | Category | Confirmed commands | Meaning |
+| --- | --- | --- | --- |
+| `0x01` | **Static Data** | `(0x01, 0x02)` | device config / identity that changes rarely |
+| `0x03` | **Live Data** | `(0x03, 0x01)` | real-time state (position, heading, battery) |
+| `0x06` | **Peer** | `(0x06, 0x02)` per-peer, `(0x06, 0x07)` Peer Sync | peer list / bond sync between Totems |
+| — | **Conn Status** | (handshake) | connection readiness + mode negotiation |
+
+The transmit path names the same set through **command namespaces** (each a `*_cmd_id`
+symbol), which correspond to categories/sub-protocols:
+
+| Namespace symbol | Sub-protocol |
+| --- | --- |
+| `static_data_cmd_id` | Static Data (0x01) |
+| `peer_cmd_id` | Peer / mesh sync (0x06) |
+| `option_cmd_id` | device options / preferences |
+| `wifi_cmd_id` | WiFi credential + hotspot control |
+| `ota_cmd` | OTA control (start/close/status) |
+
+ACKs are logged per category and prove the receive side of each:
+`BLE ACK Static Data`, `BLE ACK Live Data`, `BLE ACK Peer Ping`, `BLE ACK Peer Sync`,
+`BLE ACK Comms Handoff`.
+
+<Info>
+The **full numeric enumeration** of every `cmd_id` within each category lives in a
+frozen table referenced by the symbol `TOTEM_MSG_MAP`. The pairs above are the ones the
+firmware logs in cleartext; the rest require bytecode disassembly to enumerate exactly.
+</Info>
+
+## Message identity & lifetime
+
+Mesh/peer messages are de-duplicated and expired:
+
+| Symbol | Role |
+| --- | --- |
+| `gen_msg_uid` | generate a unique id per message |
+| `MSG_EXP_MSECS` | message expiry window |
+| `MSG_IN_BUFF`, `MSG_OUT_BUFF` | inbound / outbound ring buffers |
+| `msg_interval_ms`, `msg_offset_ms` | send scheduling |
+| `MESH_PEER_MSG_LIMIT` | per-peer message cap |
+| `last_msg_rx`, `last_msg_tx`, `last_msg_ticks` | liveness tracking |
+
+This lets a message flood the mesh once and be dropped as a duplicate on re-receipt
+(`Demi-god command ignored, already received` is the same idea in the command path).
+
+## Chunking
+
+Payloads larger than the link MTU are fragmented by a common chunking layer
+(`f_ble/chunking.py`). The relevant constants:
+
+| Symbol | Role |
+| --- | --- |
+| `CHUNK_HDR_FMT` | `struct` format of the per-chunk header |
+| `CHUNK_HDR_SZ` | header size in bytes |
+| `CHUNK_BUFF_SZ` | chunk buffer size |
+| `FrameSchemaId` | negotiated frame schema per connection |
+
+The chunk header (`CHUNK_HDR_FMT`) prefixes each fragment. Its exact field order is a
+bytecode literal; from the file-transfer logs the carried fields are at least:
+file id, chunk number, chunk size, and byte position.
+
+## File transfer
+
+`f_ble/file_upload.py` implements resumable, acknowledged file transfer over the chunk
+layer. The per-chunk log line enumerates the protocol fields:
+
+```text
+Chunk No: {}/{} | Pct: {:.3f} | File ID: {} | Chunk Size: {} |
+Byte Pos: {} | File Size: {} | Run Time: {} | Latency: {} | len: {} | queued: {}
+```
+
+Control flow (from `[Upload]` logs):
+
+| Event | Meaning |
+| --- | --- |
+| `App header | status: {} | action: {} | chunk: {} | err: {}` | transfer control frame |
+| `Resuming at chunk {}` | resume an interrupted transfer |
+| `Chunk {} acknowledged successfully` | per-chunk ACK |
+| `Ignoring header for file_id {} (in flight: {})` | de-dupe concurrent transfers |
+| `Streamed {} B in {} chunks | {} ms` | completion summary |
+| result codes | `1=done 2=no app 3=retry 4=failed 5=cancel 6=abort` |
+
+Named files moved over this path include `content.json`, `config.json`, `commslog.bin`,
+`ble_keys.bin`, `debug.bin`, and AssistNow GNSS data (`assist-now-b.bin`).
+
+## Struct catalog (wire layouts)
+
+Payloads are packed with Python `struct`. The firmware's format strings are recovered
+verbatim; each defines a byte-exact record. A representative selection:
+
+| Format | Fields (struct codes) | Likely use |
+| --- | --- | --- |
+| `<BB` | cat_id, cmd_id | bare message header |
+| `<BBHbBBiHiB` | mixed bytes/half/int | a live-data / status record |
+| `<ffbb...` (e.g. `<ffbbh`, `<ffbBih`) | two floats + flags | lat/lon (float32) + flags |
+| `<BBffbbbHbbH` | 2 bytes + 2 floats + flags | position + metadata record |
+| `<biHBBBbBBBbhhiiibbb` | wide mixed record | full peer/nav telemetry |
+| `!QQ` | two big-endian u64 | 16-byte id / MAC pair |
+
+<Note>
+Dozens of distinct formats are present (see the reference data in the repo). Floats
+(`f`) consistently appear in pairs, matching latitude/longitude; the leading `BB`
+matches the `(cat_id, cmd_id)` header. Binding each exact format to a specific message
+requires bytecode disassembly, but the byte layouts themselves are fully recovered.
+</Note>

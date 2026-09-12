@@ -1,0 +1,78 @@
+---
+title: "Power, input & sensors"
+description: "Battery/sleep management, the Touch Crystal, the SOS button, Vibe Mode, and the temperature sensor."
+---
+
+## Power & battery
+
+`device_power.py` owns the power state machine; `wdt_manager.py` the watchdogs.
+
+| Concept | Evidence |
+| --- | --- |
+| Power modes | `Changing power mode from {} to: {}`, `Power Control | Desired boot_mode: {}` |
+| Boot cause | `BOOT_POWER_ON`, `BOOT_SHUTDOWN` |
+| Battery health | `Changing battery health to: {}`, `BATT_POOR_TOUCH` |
+| Low-voltage cutoff | `Voltages too low, powering down | {}v` |
+| OTA gate | `Battery too low for OTA update` (≥50% required) |
+
+### Sleep
+
+The device targets multi-hour battery life (up to ~12 h for v5.0) via aggressive sleep.
+
+<CardGroup cols={2}>
+  <Card title="Light sleep" icon="moon">
+    `Awoke from lightsleep | Slept for: {} of {} | Total Sleep: {} | sleep duty: {:.3f}`.
+    Radios and LEDs are gated off; a `dev_total_lightsleep_ms` counter tracks duty.
+  </Card>
+  <Card title="Deep sleep" icon="power-off">
+    State persists in RTC memory (`f_lib/rtc_mem.py`, `rtc_v2.py`).
+    Wake: `Awake from Deep Sleep | {} | Free mem: {}`.
+  </Card>
+</CardGroup>
+
+GNSS RTC sync can hold off sleep (`Block sleep for GNSS RTC Sync`) so a time sync
+completes before the device drops power.
+
+## Touch Crystal
+
+Capacitive touch input via `touch_button_v2.py` (`io_mgr.py` for the pin plumbing).
+
+| Concept | Evidence |
+| --- | --- |
+| Tap events | `[on_touch] Event | tap_count: {} | duration_ms: {}` |
+| Gestures | `DOUBLE_TAP`, single tap, `on_release`, `Taps: {}` |
+| Adaptive sensitivity | `[touch] Low battery mode ON/OFF | sens: {:.3f}` |
+| Debounce after boot | `Booted: {} ago, waiting: {} before enabling touch` |
+| Temporary disable | `Block Touch starting/Completed: {}` |
+
+Touch sensitivity is recalibrated as the battery drains so the crystal keeps working at
+low voltage.
+
+## SOS button
+
+`button.py` (`AsyncButton`) handles the physical button. A **triple-click** puts the
+device into the [hotspot OTA](/protocols/wifi-ota) updater. The button also drives
+normal UI actions and the SOS alerting feature.
+
+## Vibe Mode (passive calibration)
+
+`new_vibe.py` is the v5.0 "Vibe Mode" that performs **passive magnetic calibration**
+while the device moves normally — no dedicated calibration dance. Its telemetry is
+verbose:
+
+```text
+NEWVIBE {} | module imported (deploy OK)
+NEWVIBE {} | task started, waiting on enable events
+NEWVIBE {} | reads={} sleep={}ms median NB={} | scale=auto p93 up={} k=1/{} sc={}-{} h_on={} fade={}ms/px leak=1/{} sub={}/4 seed={}
+#NEWVIBE-REC {} n={} sc={} h_on={} ble={}
+```
+
+It runs as a gated asyncio task (`task started, waiting on enable events`,
+`resumed after pause`, `task cancelled`), feeding calibration samples into the compass
+(`gap_xy` residual) — the "passive calibration in Vibe Mode" from the v5.0 release notes.
+
+## Temperature sensor
+
+`ds18x20.py` + `onewire.py` drive a **DS18B20** 1-Wire temperature sensor
+(`_search_rom`, `DS18X20`), used for temperature compensation and/or environment
+reporting.

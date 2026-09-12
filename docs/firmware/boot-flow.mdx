@@ -1,0 +1,67 @@
+---
+title: "Boot & power states"
+description: "From reset to the application main loop, and the device power modes."
+---
+
+## Boot sequence
+
+```mermaid
+flowchart TD
+  A[ESP32 ROM] --> B[2nd-stage bootloader]
+  B --> C{OTA data valid?}
+  C -->|yes| D[boot selected OTA app slot]
+  C -->|no / invalid| E[fall back to factory / previous]
+  D --> F[MicroPython starts]
+  F --> G[_boot.py: mount VFS via flashbdev]
+  G --> H[inisetup.py: first-run setup if needed]
+  H --> I[main.py / project_main.py]
+  I --> J[determine boot_mode]
+  J --> K[start asyncio task set]
+```
+
+- The bootloader validates the appended image SHA-256 and the OTA-data partition,
+  then jumps into the selected app slot. Failed or rolled-back updates land on the
+  previous good slot (see [OTA](/subsystems/ota)).
+- `_boot.py` mounts the filesystem through `flashbdev.py` (the flash block device).
+- `inisetup.py` performs first-boot filesystem setup.
+- `main.py` / `project_main.py` bring up the application: event bus, task manager,
+  LEDs, radios, GNSS, and the compass state machine.
+
+## Power / boot modes
+
+`device_power.py` tracks a `boot_mode` and a battery-health state. Observed states and
+transitions (from log strings):
+
+| Concept | Values / evidence |
+| --- | --- |
+| Boot cause | `BOOT_POWER_ON`, `BOOT_SHUTDOWN` |
+| Power mode change | `Changing power mode from {} to: {}` |
+| Battery health | `Changing battery health to: {}` (`BATT_POOR_TOUCH` seen) |
+| Desired boot mode | `Power Control | Desired boot_mode: {}` |
+| Low-voltage cutoff | `Voltages too low, powering down | {}v` |
+
+## Sleep
+
+The device uses both light and deep sleep aggressively to reach the multi-hour battery
+life quoted for v5.0.
+
+<CardGroup cols={2}>
+  <Card title="Light sleep" icon="moon">
+    Periodic wake with duty tracking:
+    `Awoke from lightsleep | Slept for: {} of {} | Total Sleep: {} | sleep duty: {:.3f}`.
+    GNSS RTC sync can block sleep (`Block sleep for GNSS RTC Sync`).
+  </Card>
+  <Card title="Deep sleep" icon="power-off">
+    State is preserved in RTC memory (`f_lib/rtc_mem.py`, `rtc_v2.py`). On wake:
+    `Awake from Deep Sleep | {} | Free mem: {}`.
+  </Card>
+</CardGroup>
+
+Touch sensitivity adapts to the power state — `[touch] Low battery mode ON/OFF` adjusts
+the capacitive baseline so the Touch Crystal still works as the battery drains.
+
+## Watchdog
+
+`wdt_manager.py` manages the task watchdog. A dedicated BLE handoff watchdog
+(`ble_handoff_watchdog`, `[BLE Watchdog] Handoff stall detected`) guards the peer-to-peer
+comms handoff so a stalled Bluetooth owner cannot wedge the mesh.

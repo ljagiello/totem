@@ -30,3 +30,7 @@ completeness matrix — is under [`docs/protocols/`](docs/protocols/).
 All analysis is static: no code was executed on a device and no service was attacked.
 The releases API and firmware objects are served publicly. See
 [`docs/reference/methodology.mdx`](docs/reference/methodology.mdx).
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

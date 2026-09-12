@@ -27,11 +27,13 @@ exist, distinguished in the logs, with different package formats:
 | Firmware | `Performing Firmware update via WiFi` | `.bin` (`.bin package not found in repo`) |
 | Preview | `Performing Preview update via WiFi` | `.tgz` gzipped tar (`.tgz package not found in repo`, `Downloaded file is not .tgz`) |
 
-The payload for either method is described by a downloaded **JSON manifest**
-(`package.json` / `contents.json`, `Downloading content.json`), not a fixed filename.
-The image streams into the inactive OTA slot via `ota_block_writer.py`, its SHA-256 is
-verified (`File integrity confirmed!` / `SHA256 hash does NOT match`), and on success the
-device reboots into the new slot (`OTA completed successfully!`).
+The payload for either method is described by a downloaded **`contents.json`** — a JSON
+**array of filenames** (`Downloading content.json`), not a fixed filename; the device
+picks the entry ending in `.bin` (firmware) or `.tgz` (preview). The image streams into
+the inactive OTA slot via `ota_block_writer.py`, its SHA-256 is verified
+(`File integrity confirmed!` / `SHA256 hash does NOT match`), and on success the device
+reboots into the new slot (`OTA completed successfully!`). See
+[OTA server contract](#ota-server-contract) for the full request/response exchange.
 
 ### Command-triggered over the API WebSocket
 
@@ -55,11 +57,56 @@ as a literal** in this firmware — it lives in bytecode and cannot be recovered
 strings. Only the gate itself is confirmed.
 </Note>
 
+## OTA server contract
+
+The station-WiFi update is a plain-HTTP REST + fetch exchange against
+`http://api.totemportal.com` (`API_ENDPOINT` — no TLS, no auth). A custom server that
+answers these exchanges (or a spoofed `api.totemportal.com` via DNS/ARP) is sufficient to
+push firmware to a device you own: there is **no API key, client certificate, HMAC, or
+image signature** anywhere on this path.
+
+<Steps>
+  <Step title="Device polls for a release">
+    `POST http://api.totemportal.com/devices/{MAC}/ota` with a JSON body
+    (`get_release_from_api`). `{MAC}` is the uppercase-hex device MAC (`get_mac_addr`):
+
+    ```json
+    {"version": "5.0.2", "endpoint_id": 1, "device_type_id": 1,
+     "lat": 0.0, "lon": 0.0, "gnss_time": 0, "release_id": 42}
+    ```
+  </Step>
+  <Step title="Server returns a release object">
+    The reply (`get_release_details`) must expose these fields:
+
+    ```json
+    {"ota_url": "http://<host>/repo/*", "version": "5.0.3",
+     "product": "totem_compass", "branch": "totem",
+     "release_code": "5.0.3", "release_id": 123}
+    ```
+  </Step>
+  <Step title="Device fetches the package index">
+    `GET {ota_url}/contents.json` (`?uid=` appended when uncached) returns a JSON
+    **array of filenames** (`contents.json syntax err, cannot parse` on bad JSON). The
+    device picks the entry ending in `.bin` (firmware) or `.tgz` (preview) — e.g.
+    `["firmware_v5.0.3.bin"]`. The version is parsed as the substring between `_v` and
+    the extension.
+  </Step>
+  <Step title="Device downloads, verifies, flashes, reboots, acks">
+    The picked file is downloaded (`.bin` streamed to the OTA slot; `.tgz` unpacked to
+    VFS), verified by **SHA-256 only** (no signature), flashed, and the device reboots.
+    It then reports success with
+    `POST http://api.totemportal.com/devices/{MAC}/ota?updated` (`record_release`,
+    `Recording OTA release`) — a JSON body carrying `boot_count`, `branch`, `device_age`,
+    `device_type_id`, `product`, `release_code`, `release_id`, `lat`, `lon`, `gnss_time`.
+    A custom server need only accept it with 200.
+  </Step>
+</Steps>
+
 ## Where the firmware comes from
 
 The device fetches release metadata from the Totem API and downloads the package from S3.
-On-device, the payload is **resolved through a JSON manifest** (`package.json` /
-`contents.json`) rather than a fixed filename: version is tracked as a **release code**
+On-device, the payload is **resolved through `contents.json`** (a JSON array of
+filenames) rather than a fixed filename: version is tracked as a **release code**
 (`release_code` / `release_id` / `MPY_OTA_VER`), and `5.0.2` appears only as a version
 banner, never as a path or filename.
 
@@ -80,10 +127,11 @@ product / branch dirs (`totem_compass`, `totem_compass/totem`) plus the template
 [download URL](/reference/download-url) for the full breakdown.
 </Note>
 
-The device-side endpoints are templated as `{base}/devices/{}/ota` and
-`{base}/devices/{}/ota?updated` (confirmed literals, two `{}` placeholders each). The
-second placeholder is **inferred** to be the device MAC/ID (`get_mac_addr` / `BT_MAC` /
-`Device ID`), not byte-confirmed.
+The device-side endpoints are `http://api.totemportal.com/devices/{MAC}/ota` (release
+poll) and the `…/ota?updated` success callback (`get_release_from_api` /
+`record_release`). `{MAC}` is the uppercase-hex device MAC (`get_mac_addr`) — confirmed
+by bytecode, not merely symbol adjacency. See
+[OTA server contract](#ota-server-contract) for the request/response bodies.
 
 ## Transport security
 
@@ -93,8 +141,9 @@ The observed OTA download URLs use **HTTP**, not HTTPS
 `http://api.totemportal.com`). Integrity therefore rests on the **image-level checks**
 (appended SHA-256 and the ESP-IDF OTA validation / rollback), not on TLS. The mbedTLS
 stack is compiled in and used elsewhere, but the update fetch itself was seen over
-cleartext. Whether the image is additionally signature-verified (ECDSA) at install time
-is not determinable from strings alone.
+cleartext. There is **no image signature** on the OTA path — integrity is the SHA-256
+digest only (confirmed in `f_ota/install_ota.py`); the ECDSA/mbedTLS machinery in the
+image is unused here, so a custom OTA server needs no signing key.
 </Warning>
 
 ## The hotspot method (legacy / sunset)

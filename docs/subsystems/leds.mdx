@@ -11,42 +11,53 @@ behavior in `leds.py` and `animations.py`.
 
 | Element | Evidence |
 | --- | --- |
-| LED type | **APA106** (`APA106`, `apa106.py`) — WS2812-like, single-wire |
-| Transport | RMT bit-stream (`bitstream_channel`) |
-| Pixel count | `RING_PX_COUNT`, `CRYSTAL_PX_COUNT` — the ring/crystal split matches the `_ring_leds`/`is_ring` and `_crystal_leds`/`is_crystal` symbol pairs; both integer values remain undetermined (frozen-bytecode small-ints) |
-| Palette | `COLOR_LIST`, `Colors`, `CLEAR` |
-| Controller | `DeviceLeds`, `_ring_leds`, `_write_lvl`, `_spin_deg` (rotational effects) |
+| LED type | **APA106** (`APA106`, `apa106.py`) — WS2812-like, single-wire; `APA106` subclasses `NeoPixel` with byte `ORDER = (0, 1, 2, 3)` (**confirmed**) |
+| Transport | RMT bit-stream via `machine.bitstream` — imported as `bitstream` in `neopixel.py` / `f_lib/neopixel_v2.py` (**confirmed**; there is no `bitstream_channel` symbol) |
+| Pixel count | **`RING_PX_COUNT` = 60**, **`CRYSTAL_PX_COUNT` = 7** — module-level ints in `project_data.py` (**confirmed**). The ring/crystal split matches the `_ring_leds`/`is_ring` and `_crystal_leds`/`is_crystal` symbol pairs |
+| Palette | `Colors` class (13 named colors, `project_data.py`). `COLOR_LIST` is a *separate*, OTA-BLE-only 3-color gradient `((200,0,200),(100,0,200),(0,0,200))` in `ota_ble.py`, not the main palette |
+| Controller | `DeviceLeds` (`peripherals.py`) owns `_ring_leds` / `_crystal_leds`; the low-level strip driver class is `LightStrip` (`leds.py`). Rotation uses `_spin_deg`, which is an `imu_fusion` attribute, not an LED-module symbol |
 
 APA106 is driven via the ESP32 RMT peripheral as a precise bit-stream, the standard
 technique for these single-wire addressable LEDs.
 
 ### Colors
 
-The palette (`Colors` class, `COLOR_LIST`) interns 12 named colors as qstr symbols
-(**confirmed**): `OFF`, `white`, `yellow`, `orange`, `blue`, `magenta`, `aqua`, `indigo`,
-`teal`, `yl_green`, `bl_green`, `hot_pink`. (Notably there is no `red`, `green`, `pink`, or
-`cyan` qstr — the palette uses `hot_pink`/`yl_green`/`bl_green`/`aqua`/`indigo` instead.)
-The exact RGB byte values were recovered from the frozen tuples (**bytes confirmed**); the
-name→RGB pairings are **inferred** (strong except `teal`):
+The `Colors` class (`project_data.py`) defines **13 named colors** (**confirmed**): `red`,
+`orange`, `yellow`, `yl_green`, `green`, `bl_green`, `teal`, `white`, `aqua`, `blue`,
+`indigo`, `magenta`, `hot_pink`. That is also the order of the internal 13-tuple the class
+uses as its color→id table, so it doubles as the module's `COLOR_LIST`-style index order.
+(There is no `pink` or `cyan` qstr; `hot_pink` and `teal` fill those roles. There *is* a
+`red` and a `green` qstr — the earlier claim that these were absent was wrong.) The
+name→RGB pairings are **confirmed**: the class binds each name to its tuple with an explicit
+`STORE_ATTR` in the disassembly, so these are no longer inferred:
 
 | Name | RGB | Grade |
 | --- | --- | --- |
-| `OFF` | (0, 0, 0) | inferred |
-| `white` | (255, 255, 255) | inferred |
-| `orange` | (255, 128, 0) | inferred |
-| `yellow` | (255, 255, 0) | inferred |
-| `yl_green` | (128, 255, 0) | inferred |
-| `bl_green` | (0, 255, 128) | inferred |
-| `aqua` | (0, 255, 255) | inferred |
-| `teal` | (0, 128, 255) | uncertain (standard teal is (0, 128, 128)) |
-| `blue` | (0, 0, 255) | inferred |
-| `indigo` | (128, 0, 255) | inferred |
-| `magenta` | (255, 0, 255) | inferred |
-| `hot_pink` | (255, 0, 128) | inferred |
+| `red` | (255, 0, 0) | confirmed |
+| `orange` | (255, 128, 0) | confirmed |
+| `yellow` | (255, 255, 0) | confirmed |
+| `yl_green` | (128, 255, 0) | confirmed |
+| `green` | (0, 255, 0) | confirmed |
+| `bl_green` | (0, 255, 128) | confirmed |
+| `teal` | (0, 255, 255) | confirmed |
+| `white` | (255, 255, 255) | confirmed |
+| `aqua` | (0, 128, 255) | confirmed |
+| `blue` | (0, 0, 255) | confirmed |
+| `indigo` | (128, 0, 255) | confirmed |
+| `magenta` | (255, 0, 255) | confirmed |
+| `hot_pink` | (255, 0, 128) | confirmed |
 
-When Totems auto-bond, peers are assigned colors from an 8-color bond palette
-(`shuffle_bond_colors`, log `Setting new auto-bond colors`): hot_pink, green, blue, yellow,
-orange, aqua, indigo, teal (exact ordered bytes confirmed; the auto-bond role is inferred).
+Note: the disassembly settles the earlier `teal`/`aqua` ambiguity — `teal` is `(0, 255, 255)`
+and `aqua` is `(0, 128, 255)` (the previous table had these two swapped). There is **no**
+named `OFF` color; the "off" / clear state is the literal `(0, 0, 0)` used by
+`LightStrip.off` / `fill`, not a palette entry.
+
+When Totems auto-bond, peers are assigned colors by `shuffle_bond_colors`, invoked right
+after the log `Setting new auto-bond colors` (**confirmed** — the log immediately precedes
+the call). It shuffles a **9-color** subset given as color indices
+`[12, 4, 9, 2, 10, 1, 6, 7, 11]` — i.e. hot_pink, green, blue, yellow, indigo, orange, teal,
+white, magenta (**confirmed**; the earlier "8-color: …, orange, aqua, indigo, teal" list was
+wrong on both count and order).
 
 ## Animation set
 
@@ -93,16 +104,23 @@ also mapped per bonded peer**, not derived from `__version__`:
 | --- | --- |
 | `crystal_default`, `powerup_crystal_clr` | the power-up crystal color is a stored default |
 | `Change default crystal color: {}` | that default is user-changeable (log string) |
-| `PEER_CRYSTAL_MAP` | crystal color is mapped per bonded peer |
+| `PEER_CRYSTAL_MAP` = (1, 2, 4, 6) | crystal color is mapped per bonded peer — a 4-tuple of color-list indices (→ orange, yellow, green, teal), **value confirmed** |
 | `Can't change color - in bond group` | color changes are blocked while in a bond group |
 
-OTA/update state→color mappings — white progress ring while downloading, a full white fill
-on success, a pink spinning animation when the hotspot can't be reached, and an orange
-blink on update failure — are described in the [WiFi OTA](/protocols/wifi-ota) guide and
-are **sourced from that guide, not confirmed in firmware**. The binary confirms only the
-named constants `PROGRESS_RGB` and `ERROR_RGB` (values undetermined) and that `orange` is a
-defined color; there is no `white fill` or `pink spinning` literal and no proven
-state→color binding.
+OTA/update state→color mappings are described in the [WiFi OTA](/protocols/wifi-ota) guide.
+The disassembly of `ota_callback.py` resolves the two color constants (previously "values
+undetermined"), so two of the four guide claims are now **confirmed in firmware** and two
+remain guide-only:
+
+| Guide claim | Firmware evidence |
+| --- | --- |
+| white progress ring while downloading | **confirmed** — `PROGRESS_RGB = dim_leds(colors.white, 0.3)` (white at 30% brightness) |
+| orange blink on update failure | **confirmed** — `ERROR_RGB = dim_leds(colors.orange, GLOBAL_BRT)`, applied via `ring.fill(ERROR_RGB, True)` |
+| full white fill on success | guide only — no matching literal or state→color binding found |
+| pink spinning when hotspot can't be reached | guide only — no `pink` / `spinning` literal found |
+
+`dim_leds(rgb, brt)` returns the RGB tuple with each channel scaled by `brt`. A third
+constant, `LOG_RGB = dim_leds(colors.white, GLOBAL_BRT)`, is defined alongside these.
 
 ## Power interaction
 

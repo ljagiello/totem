@@ -9,10 +9,10 @@ description: "Battery/sleep management, the Touch Crystal, the SOS button, Vibe 
 
 | Concept | Evidence |
 | --- | --- |
-| Power modes | `Changing power mode from {} to: {}`, `Power Control | Desired boot_mode: {}` |
+| Power modes | `Changing power mode from {} to: {}`, `Power Control \| Desired boot_mode: {}` |
 | Boot cause | `BOOT_POWER_ON`, `BOOT_SHUTDOWN` |
 | Battery health | `Changing battery health to: {}`, `BATT_POOR_TOUCH` |
-| Low-voltage cutoff | `Voltages too low, powering down | {}v` |
+| Low-voltage cutoff | `Voltages too low, powering down \| {}v` |
 | OTA gate | `Battery too low for OTA update` (guard confirmed; the numeric threshold is not present in the binary) |
 
 ### Sleep
@@ -59,12 +59,13 @@ and the ESP, reclaiming TX priority when a stall is detected
 ## Touch Crystal
 
 Capacitive touch input via `touch_button_v2.py` (`io_mgr.py` for the pin plumbing), which
-wraps a custom native driver `c_cap_touch` (python name `cap_touch`) built on the ESP-IDF
-`touch_pad` API (`touch_pad_init failed`, etc.) — not the stock touch module.
+wraps a custom native driver imported in Python as `c_cap_touch` (`IMPORT_NAME` /
+`STORE_NAME c_cap_touch`), built on the ESP-IDF `touch_pad` API (`touch_pad_init failed`,
+etc.) — not the stock touch module.
 
 | Concept | Evidence |
 | --- | --- |
-| Tap events | `[on_touch] Event | tap_count: {} | duration_ms: {}` |
+| Tap events | `[on_touch] Event \| tap_count: {} \| duration_ms: {}` |
 | Gestures | `DOUBLE_TAP`, single tap, `on_release`, `Taps: {}` |
 | Adaptive sensitivity | `[touch] Low battery mode ON` / `[touch] Low battery mode OFF` |
 | Debounce after boot | `Booted: {} ago, waiting: {} before enabling touch` |
@@ -73,8 +74,8 @@ wraps a custom native driver `c_cap_touch` (python name `cap_touch`) built on th
 Touch sensitivity is recalibrated as the battery drains so the crystal keeps working at
 low voltage. The two low-battery log forms differ: OFF reports a single value
 (`[touch] Low battery mode OFF | sens: {:.3f}`), while ON reports the base and scaled
-values (`[touch] Low battery mode ON | base_sens: {:.3f}` then ` adjusted: {:.3f}`) via
-`_LOW_BATT_FLOOR` and `_LOW_BATT_MULTIPLIER`.
+values in one line (`[touch] Low battery mode ON | base_sens: {:.3f} → adjusted: {:.3f}`)
+via `_LOW_BATT_FLOOR` and `_LOW_BATT_MULTIPLIER`.
 
 ### Native parameter validation bounds
 

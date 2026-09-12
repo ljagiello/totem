@@ -1,0 +1,330 @@
+---
+title: "Building a custom client"
+description: "A practical reference for implementing your own client that talks to your own Totems over BLE, the ESP-NOW mesh, and a custom OTA server — no keys required."
+---
+
+This page collects everything a from-scratch client needs to talk to Totems you own:
+the BLE GATT link the phone app uses, the ESP-NOW mesh frame, a drop-in OTA server, and
+the chunked-transfer header. Every value here is verified against the recovered
+`firmware_v5.0.2.bin` image; confidence is graded **Confirmed** / **Inferred** /
+**Partial** throughout.
+
+## No cryptographic secrets are required
+
+The single most important fact for a client author: **you need no keys, no pairing, no
+signatures, and no shared secret** to interoperate. Nothing on the application path is
+authenticated or encrypted (**Confirmed**).
+
+| Path | Protection a client must handle |
+| --- | --- |
+| ESP-NOW (broadcast **and** unicast) | none — entirely cleartext, no PMK/LMK ever programmed |
+| BLE GATT | none — no pairing/bonding/encryption; an unpaired central can read and write |
+| Application messages (BLE + mesh) | none — no token, HMAC, challenge/response, or signature anywhere |
+| OTA | integrity only — SHA-256 hash, **no** firmware signature, fetched over plain HTTP |
+
+<Note>
+  The ESP-NOW ROM module *contains* the concept of encryption (`set_pmk`, `lmk`,
+  `encrypt`), but no frozen Python module references those symbols, and `add_peer(mac)` is
+  always called with a single positional argument, so `lmk=None` and `encrypt=False`. The
+  only crypto in the image is the bundled (and, on the app path, unused) mbedTLS stack plus
+  the OTA SHA-256. `ble_keys.bin` holds optional BLE reconnect secrets — not required to
+  connect.
+</Note>
+
+## BLE client
+
+The Totem is a BLE **peripheral**; your client is the **central**. No pairing is required.
+
+### Connect
+
+Scan and connect by the **service UUID** — the advertised local name is built at runtime,
+so do not match on it.
+
+| Item | Value |
+| --- | --- |
+| Service UUID | `7913b588-0000-4635-b066-baa2cfc197cf` |
+| Pairing / bonding | not required |
+
+The recovered code (`ble_core.py`) registers **two** characteristics under that service,
+both with GATT flags `0x3E` (READ | WRITE | WRITE_NO_RESP | NOTIFY | INDICATE):
+
+| Characteristic UUID | Name | Role |
+| --- | --- | --- |
+| `7913b588-0001-4635-b066-baa2cfc197cf` | `chars__conn_status` | control / handshake — the client writes here |
+| `7913b588-0002-4635-b066-baa2cfc197cf` | `chars__data_transfer` | application data |
+
+<Note>
+  A third characteristic *name*, `chars__on_demand`, exists as a qstr and is **referenced**
+  (read) by the file-upload path (`f_ble/file_upload.py`), but the disassembly shows it is
+  never created: `ble_core.py` calls `add_characteristic` only twice — for `chars__conn_status`
+  (`…-0001`) and `chars__data_transfer` (`…-0002`) — and **no `…-0003` UUID appears anywhere
+  in the image**. Do not assume a `…-0003` characteristic; send and receive all application
+  data on `…-0002` (**Confirmed**).
+</Note>
+
+Direction is fixed: **client → device is a GATT write**; **device → client is
+notify/indicate** (on connection handle 0). The data characteristic's GATT value buffer is
+**185 bytes**; larger payloads use the [chunked transfer](#chunked-transfer) header. MTU is
+client-negotiated — aim for at least ~188 so a full frame fits in one write.
+
+### Handshake (ConnStatus-Ready)
+
+The device will not transmit application data until the client has both taken TX ownership
+and signalled TX-ready.
+
+<Steps>
+  <Step title="Subscribe to notifications">
+    Enable notifications/indications on `…-0002` so the device can push data.
+  </Step>
+  <Step title="Write the ConnStatus-Ready frame">
+    Write the 4-byte frame `[0x00, 0x01, conn_mode, frame_schema_id]` to `…-0001`.
+    In `recv_status_msgs`, `conn_mode == 1` sets `evt_is_tx_owner` (TX ownership) and **any
+    `frame_schema_id > 0`** sets `evt_is_tx_ready` — the two gates `send_data_v2` waits on.
+    The app's observed ids **25, 45, 59, 72** select the device's `EXTENDED` payload variant;
+    any non-zero value opens the gate, so pick one of those to keep the schema consistent.
+  </Step>
+  <Step title="Data flows">
+    With TX-owner and TX-ready both set, the device streams `(cat_id, cmd_id)` records.
+    Read them with the `gen_*` layouts below.
+  </Step>
+</Steps>
+
+The device logs the gate it is waiting on as
+`[send_data_v2] | is_tx_owner not set` / `is_tx_ready not set`. To disconnect gracefully,
+write a frame beginning `[0x00, 0x03, …]`.
+
+<Info>
+  The gate `recv_status_msgs` applies is now recovered: TX-ready is exactly
+  `frame_schema_id > 0` and TX-owner is `conn_mode == 1` (**Confirmed** from the
+  disassembly). The four ids **25, 45, 59, 72** are the app's observed values and map to the
+  `EXTENDED` schema variants; any non-zero id passes the gate. An optional app→Totem
+  runtime-status message uses
+  `cat_id 0x03` with a bitfield in `msg[2]`: bit0 isActive, bit1 isFocused, bit2 isLocked,
+  bit3 isUiClosed, bit4 isService, bit5 isDisconn.
+</Info>
+
+### Messages to read (BLE `gen_*` layouts)
+
+<Warning>
+  The BLE GATT layouts are **not** the ESP-NOW layouts. The same `(cat_id, cmd_id)` key is
+  reused by two transports with different struct layouts — for example BLE `gen_live_data`
+  `(0x03,0x01)` is a 69-byte record, while `TOTEM_MSG_MAP (3,1)` is 20 bytes. A BLE client
+  must use the `gen_*` layouts here; a mesh client must use the [mesh map](#esp-now-mesh-client).
+</Warning>
+
+All BLE records prefix `buff[0:2] = (cat_id, cmd_id)`. **Confirmed** layouts:
+
+**Live Data `(0x03, 0x01)`** — `gen_live_data`, `struct <bfi3fb4Bi3b2hbiffb3ibHBBb` at
+offset 2 (69 B). Fields in order:
+
+| # | code | Field |
+| --- | --- | --- |
+| 1 | `b` | sat_count |
+| 2 | `f` | p_acc, m (−1 = None) |
+| 3 | `i` | altitude, m (−500 = None) |
+| 4 | `f` | latitude, ° |
+| 5 | `f` | longitude, ° |
+| 6 | `f` | batt_volts, V |
+| 7 | `b` | esp-now channel |
+| 8 | `B` | power_bits (power_mode in bits 0-2) |
+| 9 | `B` | max_hop_cnt |
+| 10 | `B` | mesh_rx |
+| 11 | `B` | mesh_relayed |
+| 12 | `i` | unix_ts, s |
+| 13 | `b` | color_id |
+| 14 | `b` | orientation |
+| 15 | `b` | solution_id |
+| 16 | `h` | heading, ° |
+| 17 | `h` | azimuth, ° |
+| 18 | `b` | speed (cap 127, −1 = None) |
+| 19 | `i` | odometer |
+| 20-21 | `ff` | reserved ×2 |
+| 22 | `b` | reserved |
+| 23 | `i` | uptime, s |
+| 24 | `i` | age |
+| 25 | `i` | reserved |
+| 26 | `b` | power_level |
+| 27 | `H` | reserved |
+| 28 | `B` | flags |
+| 29 | `B` | reserved |
+| 30 | `b` | batt_pct |
+
+The `flags` byte (field 28) is `pack_flags(is_sos, is_eco, led_brt ≥ GLOBAL_BRT,
+gnss_location_set, power_level == 2, is_charging, 0, is_mag_cal_needed)`.
+
+**Static Data `(0x01, 0x02)`** — `gen_static_data`. `buff[2] = total_len & 255`,
+`buff[3:9] = MAC` (6 B), then `struct <biHBBBbBBBbhhiiibbb` at offset 9 (34 B), then three
+length-prefixed UTF-8 strings from offset 43:
+
+| Region | Field |
+| --- | --- |
+| `buff[2]` | total_len & 255 |
+| `buff[3:9]` | device MAC (6 B) |
+| struct @9: `b` | release_id |
+| `i` | age |
+| `H` | release_id16 |
+| `B B B` | ver_major, ver_minor, ver_patch |
+| `b` | color_id |
+| `B` | settings_flags |
+| `B` | flags (bit0 = 1) |
+| `B` | service_id |
+| `bhhiii` | 6× reserved |
+| `b b b` | len(device_name), len(branch), len(wifi_ssid) |
+| strings @43 | device_name, git branch (`N/A`), wifi_ssid (`""`) |
+
+**Peer Ping `(0x06, 0x02)`** — `gen_peer_ping`. `buff[3:9] = peer MAC` (6 B), then two
+flag bytes: A = `pack_flags(sos, is_poi, is_mesh, is_stale, is_collected, 0, is_unknown,
+0)`, B = `pack_flags(is_hidden, is_locked, 0×6)`.
+
+**Peer Sync `(0x06, 0x07)`** — `gen_peer_sync`: a peer-MAC list,
+`[0x06, 0x07, total_len & 255, peer_count, mac0(6), mac1(6), …]`.
+
+## ESP-NOW mesh client
+
+To join the mesh peer-to-peer instead of going through a phone, send/receive raw ESP-NOW
+frames on the fleet's channel.
+
+### Radio setup
+
+| Item | Value |
+| --- | --- |
+| Channel | **6** (`self.channel = 6` default; also settable at runtime via `set_channel`) |
+| PHY | `WIFI_PROTOCOL_LR` (Espressif Long Range, protocol bit 8) in ESP-NOW-only / BLE modes |
+| LR rate | IDF default 500 K — the app never calls `wlan.config(lorate=...)` |
+| Encryption | none — `add_peer(mac)` with no `lmk` |
+
+The fleet is pinned to a single channel; ESP-IDF drops off-channel frames, so a mesh client
+**must** match it. Channel 6 is the built-in default (**Confirmed**), but the live value can
+be changed at runtime (**Partial**) — see [what to confirm on-device](#still-missing--confirm-on-device).
+
+### Frame layout
+
+```text
+┌──────────┬──────────┬────────┬────────┬───────────────────────────┐
+│ SyncWord │ SyncWord │ cat_id │ cmd_id │ payload (struct-packed)   │
+│  0xA7    │  0x74    │  u8    │  u8    │ variable                  │
+└──────────┴──────────┴────────┴────────┴───────────────────────────┘
+  [0]        [1]        [2]      [3]      [4:]
+```
+
+- **SyncWord** = the 2 bytes `0xA7 0x74` (literal in the image).
+- Validation is **SyncWord match + `len >= 4` + a per-`(cat, cmd)` payload-size check**.
+- There is **no CRC or checksum** on the ESP-NOW frame. (The rodata string
+  `Invalid Checksum value for: {}` belongs to the u-blox UBX GNSS parser, not this path.)
+- Mesh dedup UID is a `uint16 randint(1, 65534)` at mesh-frame offset 20;
+  `MSG_EXP_MSECS = 150000` ms.
+
+### Payload formats (`TOTEM_MSG_MAP`, corrected)
+
+<Warning>
+  Earlier analyses decoded the map's qstr-immediates with `>>2`, producing bogus "handler
+  names" (`disconn_animation`, `device_power`, `dev_info`, `disabled`, …). Those are decode
+  artifacts and are **wrong**. ESP32 MicroPython (REPR_A) tags qstr-immediates as
+  `(o & 7) == 2` with value `o >> 3`; under the correct `>>3` decode **every** value is a
+  `struct` format string. The corrected table follows (**Confirmed**).
+</Warning>
+
+Every payload leads with the echoed `(cat_id, cmd_id)` as `BB`.
+
+| `(cat, cmd)` | Format | Size |
+| --- | --- | --- |
+| `(0,0)` / `(0,1)` / `(0,2)` | `<BBffbbhbbb6B` | 23 B |
+| `(1,0)` | `<BBB7bHbb` | 14 B |
+| `(1,2)` | `<BBiffHii` | 24 B |
+| `(1,5)` | `<BB9B8bhh4B` | 27 B |
+| `(1,6)` | `<BBbbB` | 5 B |
+| `(1,7)` | `<3Bbb` | 5 B |
+| `(2,0)` | `<BB6BffbbHbbbhhBBi` | 33 B |
+| `(3,1)` / `(3,2)` | `<BBHH4b4BHHBb` | 20 B |
+| `(7,0)` | `<BBffbbbHbbH` | 19 B |
+| `(7,1)` | `<BBHbffb` | 14 B |
+
+`EXTENDED` schema-versioned variants — `(cat, cmd) → {schema_id → fmt}`:
+
+| `(cat, cmd)` | Schema id | Format | Size |
+| --- | --- | --- | --- |
+| `(0,0)` | 25 | `<BBffbbhbbb6B` | 23 B |
+| `(0,0)` | 59 | `<BBffbbhbbb6Bhii4BhHehhffbB` | 57 B |
+| `(0,0)` | 72 | `<BBffbbhbbb6Bhii4BhHehhffbBBiiBBb` | 69 B |
+| `(1,6)` | 5 | `<BBbbB` | 5 B |
+| `(1,6)` | 29 | `<BBbb9BBB3i` | 27 B |
+| `(2,0)` | 45 | `<BB6BffbbHbbbhhBBiffh` | 43 B |
+
+The `(0,*)` 23-byte family is the mesh peer beacon: two floats (lat/lon), flags, and a
+6-byte MAC. Field-by-field mesh semantics beyond the struct layout are **Partial** — the
+byte layouts are recovered, but individual fields are not fully labelled.
+
+## Custom OTA server
+
+You can point a Totem at your own OTA server; it needs **no signing key** (SHA-256 only,
+plain HTTP). The contract (**Confirmed**):
+
+<Steps>
+  <Step title="Device announces">
+    `POST http://api.totemportal.com/devices/{MAC}/ota` (plain HTTP, no auth) with JSON body
+    `{version, endpoint_id, device_type_id, lat, lon, gnss_time, release_id}`.
+  </Step>
+  <Step title="Server replies with a release object">
+    Expose `ota_url, version, product, branch, release_code, release_id`.
+  </Step>
+  <Step title="Device fetches the manifest">
+    `GET {ota_url}/contents.json` — a JSON **array** of filenames. The device picks the
+    entry ending `.bin` (firmware) or `.tgz` (preview).
+  </Step>
+  <Step title="Download, verify, flash">
+    The device downloads the chosen file, verifies **SHA-256 only**, flashes, reboots, and
+    reports back with `POST …/ota?updated`.
+  </Step>
+</Steps>
+
+<Note>
+  A device WebSocket to `api.totemportal.com` (`ws://`) carries push OTA triggers shaped
+  like `{"cmd":…}` (**Partial**). A demi-god ESP-NOW OTA trigger also exists
+  (`demigod_gen_ota_update`), but its exact `(cat, cmd)` and struct are **not recovered** —
+  do not fabricate them.
+</Note>
+
+## Chunked transfer
+
+Payloads larger than the 185-byte GATT buffer are fragmented. The device→app transfer
+buffer is built by `f_ble/chunking.py` `gen_transfer_buff` (**Confirmed** layout):
+
+- `buff[0] = 2`, `buff[1] = 2` (a 2-byte frame prefix).
+- At offset 2: `struct.pack_into('<HBBBiHiB', buff, 2, file_id, status_id, action_id,
+  file_type_id, byte_pos, chunk_no, file_size, 0)` — `CHUNK_HDR_FMT = <HBBBiHiB`, 16 bytes.
+- `buff[18:50] = sha256` (when set); `buff[50] = name_len`, then the UTF-8 name; then
+  `err_no`.
+- `file_id = sha256[0] | sha256[1] << 8` (u16).
+
+| Field | Enum values |
+| --- | --- |
+| `status_id` | 1 = normal / in-progress, 4 = error / abort |
+| `action_id` | 0 = header / announce, 1 = last-chunk / complete |
+| `file_type_id` | 2 = upload-to-app (destinations `SAVE_TO_VFS = 1`, `SAVE_TO_OTA = 2`); other values **Partial** |
+
+The app→device reply header (`FileUploader.on_header`) is `struct <BBHbBBiHiB` (18 B). App
+`status ∈ {2, 3, 4}` is a terminal result; app `action 4` = RESUME at `chunk`, `action 1`
+= READY. Overall result codes: `1 done, 2 no-app, 3 retry, 4 failed, 5 cancel, 6 abort`.
+
+## Still missing / confirm on-device
+
+These are known-structure-but-unconfirmed items. Verify them against your own hardware
+before relying on them:
+
+| Item | Status | How to confirm |
+| --- | --- | --- |
+| Home channel | default 6 (**Confirmed**), runtime-settable (**Partial**) | sniff the fleet — the live channel can be changed via `set_channel` |
+| `frame_schema_id` gate | **Confirmed** — TX-ready is `frame_schema_id > 0`, TX-owner is `conn_mode == 1` | any non-zero id opens the gate; 25/45/59/72 select the `EXTENDED` variant |
+| Mesh payload field semantics | struct layouts **Confirmed**, per-field meaning **Partial** | correlate captured frames against known device state |
+| Demi-god OTA frame | **Partial / missing** | `(cat, cmd)` + struct not recovered — do not fabricate |
+| Runtime-only values | **Partial** | venue code, group id, and device name live in runtime state / bytecode, not the static image |
+
+## Safety
+
+<Warning>
+  Interoperate only with **Totems you own.** Because the mesh is unauthenticated and
+  unencrypted, the demi-god ESP-NOW broadcast path can affect **nearby** devices — its only
+  gate is RSSI proximity plus message-UID dedupe, with no signature or HMAC. Do not send
+  demi-god or mesh commands against devices you do not own; broadcasting near other people's
+  Totems can change their behaviour without their consent.
+</Warning>

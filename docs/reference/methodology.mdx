@@ -78,21 +78,30 @@ as **Recovered** and reproduces the full decoded map; this page records how they
 
 Defined in `espnow_conn_v2.py`, built by a `BUILD_MAP 13` / `STORE_NAME TOTEM_MSG_MAP`
 opcode sequence (fully decoded). The map is **flat**, keyed by a 2-byte `bytes` value
-`(cat_id, cmd_id)` (byte 0 = `cat_id`, byte 1 = `cmd_id`); each value is either a payload
-`struct`-format string or a handler/type name.
+`(cat_id, cmd_id)` (byte 0 = `cat_id`, byte 1 = `cmd_id`); **every** value is a payload
+`struct`-format string.
 
-| `(cat_id, cmd_id)` | Value | Kind |
+<Warning>
+An earlier pass decoded the map's qstr-immediate values with `>>2` and reported
+"handler/type names" (`disconn_animation`, `dev_total_lightsleep_ms`, `dev_info`,
+`device_power`, `disabled`). Those were **decode artifacts and are wrong**. On ESP32
+MicroPython a qstr-immediate is tagged by `(o & 7) == 2` (REPR_A), and the qstr number is
+`o >> 3`, not `o >> 2`. Under the correct `o >> 3` decode every entry resolves to a
+`struct` format string — the values below.
+</Warning>
+
+| `(cat_id, cmd_id)` | `struct` format | Size |
 | --- | --- | --- |
-| `(0, 0)` / `(0, 1)` / `(0, 2)` | `disconn_animation` | handler/type |
-| `(1, 0)` | `<BBB7bHbb` | struct fmt (14 B) |
-| `(1, 2)` | `<BBiffHii` | struct fmt (24 B) |
-| `(1, 5)` | `dev_total_lightsleep_ms` | handler/type |
-| `(1, 6)` | `<BBbbB` | struct fmt (6 B) |
-| `(1, 7)` | `<3Bbb` | struct fmt (5 B) |
-| `(2, 0)` | `dev_info` | handler/type |
-| `(3, 1)` / `(3, 2)` | `device_power` | handler/type |
-| `(7, 0)` | `disabled` | handler/type |
-| `(7, 1)` | `<BBHbffb` | struct fmt (15 B) |
+| `(0, 0)` / `(0, 1)` / `(0, 2)` | `<BBffbbhbbb6B` | 23 B |
+| `(1, 0)` | `<BBB7bHbb` | 14 B |
+| `(1, 2)` | `<BBiffHii` | 24 B |
+| `(1, 5)` | `<BB9B8bhh4B` | 27 B |
+| `(1, 6)` | `<BBbbB` | 5 B |
+| `(1, 7)` | `<3Bbb` | 5 B |
+| `(2, 0)` | `<BB6BffbbHbbbhhBBi` | 33 B |
+| `(3, 1)` / `(3, 2)` | `<BBHH4b4BHHBb` | 20 B |
+| `(7, 0)` | `<BBffbbbHbbH` | 19 B |
+| `(7, 1)` | `<BBHbffb` | 14 B |
 
 ### `struct` format → message bindings — confirmed (for listed)
 
@@ -102,18 +111,22 @@ Each payload format begins with `BB` = the echoed `cat_id`/`cmd_id` header:
 | --- | --- | --- |
 | `(1, 0)` | `<BBB7bHbb` | 14 B |
 | `(1, 2)` | `<BBiffHii` | 24 B |
-| `(1, 6)` | `<BBbbB` | 6 B |
+| `(1, 6)` | `<BBbbB` | 5 B |
 | `(1, 7)` | `<3Bbb` | 5 B |
-| `(7, 1)` | `<BBHbffb` | 15 B |
+| `(7, 1)` | `<BBHbffb` | 14 B |
 
 ### `CHUNK_HDR_FMT` — format & field order confirmed
 
 `CHUNK_HDR_FMT = <HBBBiHiB`, `CHUNK_HDR_SZ = 16` bytes — packed by `f_ble/chunking.py`'s
-`gen_transfer_buff` via `struct.pack_into` at buffer offset 2. The format string and field
-order are **confirmed** from the live `pack_into` opcode stream; the `CHUNK_HDR_FMT`
-name-to-value binding is **inferred (high confidence)** — `<HBBBiHiB` is `chunking`'s sole
-struct format and is the value imported elsewhere as `CHUNK_HDR_FMT`, but no literal
-`CHUNK_HDR_FMT = "…"` module-level assignment was seen in the frozen bytecode.
+`gen_transfer_buff` via `struct.pack_into` at buffer offset 2. The format string, field order,
+**and field names** are **confirmed** from the live `pack_into` opcode stream: `gen_transfer_buff`
+calls `struct.pack_into('<HBBBiHiB', buff, 2, self.file_id, self.status_id, self.action_id, self.file_type_id, self.byte_pos, self.chunk_no, self.file_size, 0)`
+(`LOAD_ATTR` order in the bytecode). The `CHUNK_HDR_FMT` name-to-value binding is
+**inferred (high confidence)** — `f_ble/file_upload.py` does `from f_ble.chunking import FileTransfer, UPLOAD_TO_APP, CHUNK_HDR_FMT, CHUNK_HDR_SZ`,
+so both names are real module-level exports of `chunking` consumed elsewhere (`CHUNK_HDR_SZ`
+is used as the header size in the transfer loop), and `<HBBBiHiB` is `chunking`'s sole struct
+format — but no literal `CHUNK_HDR_FMT = "…"` module-level assignment appears in the frozen
+bytecode; the format is packed inline.
 
 | `struct` code | Field | Type |
 | --- | --- | --- |
@@ -149,7 +162,7 @@ struct format and is the value imported elsewhere as `CHUNK_HDR_FMT`, but no lit
     / `tools/mpy-tool.py`, but note `mpy-tool.py -d` itself only reads standalone `.mpy`
     blobs; frozen firmware modules (emitted as `proto_fun_*` / `fun_data_*` /
     `const_qstr_table_data_*` C structs, not `.mpy` blobs) require a custom frozen-aware
-    reader. Small integers `-16..47` load inline as single-byte opcodes `0x80`–`0xAF`;
+    reader. Small integers `-16..47` load inline as single-byte opcodes `0x80`–`0xBF`;
     larger ones via `LOAD_CONST_SMALL_INT` (`0x22`, signed var-int) — both embed the value
     in the bytecode. The `TOTEM_MSG_MAP` dict build and the `CHUNK_HDR_FMT` string literal
     are then readable.

@@ -1,12 +1,14 @@
 ---
 title: "Message format"
-description: "The shared (cat_id, cmd_id) message model, chunking, file transfer, and the struct catalog."
+description: "The (cat_id, cmd_id) model, the two format registries (BLE gen_* vs ESP-NOW TOTEM_MSG_MAP), chunking, and file transfer."
 ---
 
 ## Addressing: `(cat_id, cmd_id)`
 
 Every application message carries a one-byte **category** and a one-byte **command**.
-This tuple is used identically on the BLE link and for peer sync over the mesh.
+This tuple is used on both the BLE link and the ESP-NOW mesh — but **the same
+`(cat_id, cmd_id)` maps to a different wire layout on each transport** (see
+[Two format registries](#two-format-registries-do-not-conflate)).
 
 ```text
 ┌────────┬────────┬───────────────────────────┐
@@ -19,71 +21,230 @@ Evidence: `[BLE] DataXfer cat_id: {} | cmd_id: {}`,
 `[BLE] ConnStatus cat_id: {} | cmd_id: {} | len: {}`,
 `A cmd_id must be provided for demi-god messages`.
 
+## Two format registries — do not conflate
+
+<Warning>
+`(cat_id, cmd_id)` is reused by **two transports with different struct layouts**. A
+BLE client MUST use the BLE `gen_*` formats below — the ESP-NOW `TOTEM_MSG_MAP` formats
+will decode a BLE frame into garbage.
+</Warning>
+
+| Registry | Where | What it describes |
+| --- | --- | --- |
+| **BLE `gen_*` builders** | `ble_manager.py` / `ble_core.py` | the GATT payloads the **phone reads/writes** — [BLE message formats](#ble-message-formats-gen_-what-a-client-reads) |
+| **`TOTEM_MSG_MAP` / `EXTENDED`** | `espnow_conn_v2.py` | the **ESP-NOW / mesh** peer-to-peer radio formats — [ESP-NOW registry](#esp-now-registry-totem_msg_map) |
+
+Proof they differ for the same key: BLE `gen_live_data` `(0x03, 0x01)` packs
+`<bfi3fb4Bi3b2hbiffb3ibHBBb` (69 B), while `TOTEM_MSG_MAP (3,1)` = `<BBHH4b4BHHBb`
+(20 B). Same key, different bytes. (**Confirmed**)
+
 ## Categories
 
-Confirmed `(cat_id, cmd_id)` pairs and their labels, taken directly from the
+Confirmed BLE `(cat_id, cmd_id)` pairs and their labels, taken directly from the
 `send_data_v2` transmit logs:
 
 | cat_id | Category | Confirmed commands | Meaning |
 | --- | --- | --- | --- |
 | `0x01` | **Static Data** | `(0x01, 0x02)` | device config / identity that changes rarely |
 | `0x03` | **Live Data** | `(0x03, 0x01)` | real-time state (position, heading, battery) |
-| `0x06` | **Peer** | `(0x06, 0x02)` per-peer, `(0x06, 0x07)` Peer Sync | peer list / bond sync between Totems |
+| `0x06` | **Peer** | `(0x06, 0x02)` per-peer, `(0x06, 0x07)` Peer Sync | peer list / peer sync between Totems |
 | — | **Conn Status** | (handshake) | connection readiness + mode negotiation |
 
-The transmit path names the same set through **command namespaces** (each a `*_cmd_id`
-symbol), which correspond to categories/sub-protocols:
+The receive path (`recv_data_msgs`) dispatches app→device commands on `cat_id` through
+**command namespaces** (each a `*_cmd_id` symbol):
 
-| Namespace symbol | Sub-protocol |
-| --- | --- |
-| `static_data_cmd_id` | Static Data (0x01) |
-| `peer_cmd_id` | Peer / mesh sync (0x06) |
-| `option_cmd_id` | device options / preferences |
-| `wifi_cmd_id` | WiFi credential + hotspot control |
-| `ota_cmd` | OTA control (start/close/status) |
+| Namespace symbol | cat_id | Sub-protocol |
+| --- | --- | --- |
+| `static_data_cmd_id` | `0x01` | Static Data |
+| `wifi_cmd_id` | `0x02` | WiFi credential + hotspot control |
+| `ota_cmd` | `0x04` | OTA control (start/close/status) |
+| `option_cmd_id` | `0x05` | device options / preferences |
+| `peer_cmd_id` | `0x06` | Peer / mesh sync |
 
 ACKs are logged per category and prove the receive side of each:
 `BLE ACK Static Data`, `BLE ACK Live Data`, `BLE ACK Peer Ping`, `BLE ACK Peer Sync`,
 `BLE ACK Comms Handoff`.
 
-### Full registry: `TOTEM_MSG_MAP` (recovered)
+## BLE message formats (`gen_*`) — what a client reads
 
-`TOTEM_MSG_MAP` (qstr 590) is a `(cat_id, cmd_id)`-keyed **serialization / handler
-registry**, built as a flat map in `espnow_conn_v2.py` and keyed by a 2-byte
-`(cat_id, cmd_id)` `bytes` key (byte 0 = `cat_id`, byte 1 = `cmd_id`). Each **value** is
-either a payload `struct` format string or a handler / type name — it is *not* a numeric
-label map. The 13 entries were recovered in full from the frozen bytecode (**Confirmed**):
+Each `gen_*` builder writes `buff[0:2] = (cat_id, cmd_id)` then packs the payload from
+live device state; the `LOAD_ATTR` names are the field semantics. These are the formats a
+BLE client actually reads (**Confirmed** from the `struct.pack_into` opcode stream).
 
-| `(cat_id, cmd_id)` | Value | Kind |
+### Live Data — `(0x03, 0x01)` `gen_live_data`
+
+`struct <bfi3fb4Bi3b2hbiffb3ibHBBb` packed at **offset 2** (`calcsize` = 69). 30 values,
+in this exact order:
+
+| # | code | Field (source) | Units / meaning |
+| --- | --- | --- | --- |
+| 1 | `b` | `gnss_data.sat_count` | satellites used |
+| 2 | `f` | `gnss_data.p_acc` (−1 = None) | position accuracy (m) |
+| 3 | `i` | `gnss_data.altitude` (−500 = None) | altitude (m) |
+| 4 | `f` | `location[0]` | **latitude, degrees** |
+| 5 | `f` | `location[1]` | **longitude, degrees** |
+| 6 | `f` | `modes.batt_volts` (0 = None) | battery voltage (V) |
+| 7 | `b` | `enow_v2.channel` | ESP-NOW Wi-Fi channel |
+| 8 | `B` | `power_bits` | power_mode in bits[0:3] |
+| 9 | `B` | `enow_v2.max_hop_cnt` (0..255) | mesh max hop count |
+| 10 | `B` | `modes.mesh_rx` (0..255) | mesh RX counter |
+| 11 | `B` | `modes.mesh_relayed` (0..255) | mesh relayed counter |
+| 12 | `i` | `rtc.unix(precision=1)` else 0 | unix timestamp (s) |
+| 13 | `b` | `config.color_id` | device colour id |
+| 14 | `b` | `fusion.orientation` | orientation code |
+| 15 | `b` | `gnss_data.solution_id` | GNSS fix / solution id |
+| 16 | `h` | `get_heading_mot()` | **heading (deg, motion)** |
+| 17 | `h` | `fusion.avg_azimuth` (0 if falsy) | **compass azimuth (deg)** |
+| 18 | `b` | `min(gnss_data.speed, 127)` (−1 = None) | speed (capped 127) |
+| 19 | `i` | `gnss_data.odometer` | odometer |
+| 20 | `f` | 0 | reserved |
+| 21 | `f` | 0 | reserved |
+| 22 | `b` | −1 | reserved |
+| 23 | `i` | `modes.uptime_sec` | uptime (s) |
+| 24 | `i` | `config.age` | device age |
+| 25 | `i` | 0 | reserved |
+| 26 | `b` | `modes.power_level` | power level |
+| 27 | `H` | 0 | reserved |
+| 28 | `B` | `flags` (`pack_flags`, see below) | status bitfield |
+| 29 | `B` | 0 | reserved |
+| 30 | `b` | `modes.batt_pct` | **battery %** |
+
+Flags byte #28 = `pack_flags(is_sos, is_eco_mode, led_brt≥GLOBAL_BRT, gnss_location_set, power_level==2, is_charging, 0, is_mag_cal_needed)` in that bit order. Byte #8 `power_bits`
+encodes `config.power_mode` in bits[0:3].
+
+### Static Data — `(0x01, 0x02)` `gen_static_data`
+
+`buff[2] = total_len & 255`; `buff[3:9] = MAC` (6 bytes); then
+`struct <biHBBBbBBBbhhiiibbb` at **offset 9** (`calcsize` = 34); then three
+length-prefixed UTF-8 strings from offset 43. 19 packed values:
+
+| # | code | Field | Meaning |
+| --- | --- | --- | --- |
+| 1 | `b` | `release_id` (0 if falsy) | firmware release id |
+| 2 | `i` | `config.age` | device age |
+| 3 | `H` | `release_id` (16-bit) | release id |
+| 4 | `B` | `modes.release_major` | version major |
+| 5 | `B` | `modes.release_minor` | version minor |
+| 6 | `B` | `modes.release_patch` | version patch |
+| 7 | `b` | `config.color_id` | colour id |
+| 8 | `B` | `pack_flags(is_persistent_north, is_compass_lock, 0×6)` | settings flags |
+| 9 | `B` | `pack_flags(1, 0×7)` | flags (bit0 = 1 const) |
+| 10 | `B` | `modes.service_id` | service id |
+| 11–16 | `b h h i i i` | reserved `(0,0,0,0,0,0)` | placeholders |
+| 17 | `b` | `len(device_name)` | string #1 length |
+| 18 | `b` | `len(branch)` | string #2 length |
+| 19 | `b` | `len(wifi_ssid)` | string #3 length |
+
+Then, from offset 43, three length-prefixed UTF-8 blobs: `device_name`, git `branch`
+(`'N/A'` if none), `wifi_ssid` (`''`).
+
+### Peer Ping — `(0x06, 0x02)` `gen_peer_ping`
+
+`buff[0:2] = (0x06, 0x02)`; `buff[3:9] = peer MAC` (`hex_to_bin`, 6 bytes); `buff[9]` =
+`peer.mesh_hops` clamped to `0..255`. A 40-byte record `struct <ffbbh4BHbb4BiihBbf`
+(`calcsize` = 40) is then packed at **offset 10**, followed by the UTF-8 peer name (its byte
+length is field #11 below, name bytes from offset 50) and a trailing `struct <bH` =
+`(batt_pct, release_id)`. `buff[2]` holds the total length, written last. This is a full
+~53 + name-length-byte peer record, **not** just MAC + two flag bytes — the two peer-flag
+bytes are fields 6 and 20 **inside** this struct. (**Confirmed** from the `struct.pack_into`
+opcode stream; field labels are the `LOAD_ATTR` names, so semantics are **Confirmed** where a
+name is given.)
+
+| # | code | Field (source) | Meaning |
+| --- | --- | --- | --- |
+| 1 | `f` | `peer.lat` (0 if None) | latitude |
+| 2 | `f` | `peer.lon` (0 if None) | longitude |
+| 3 | `b` | `peer.p_acc` (−1 if None) | position accuracy |
+| 4 | `b` | `min(peer.speed_kph, 127)` (−1 if None) | speed (capped 127) |
+| 5 | `h` | `peer.peer_azimuth` (−1 if None) | bearing to peer (deg) |
+| 6 | `B` | flag byte A (see below) | peer status flags |
+| 7 | `B` | `peer.rgb[0]` | colour R |
+| 8 | `B` | `peer.rgb[1]` | colour G |
+| 9 | `B` | `peer.rgb[2]` | colour B |
+| 10 | `H` | 0 | reserved |
+| 11 | `b` | peer-name length | bytes of the name packed at offset 50 |
+| 12 | `b` | `peer.rssi` (100 if None) | last RSSI |
+| 13 | `B` | `peer.msg_rx` | messages received |
+| 14 | `B` | `peer.msg_tx` | messages sent |
+| 15 | `B` | `peer.mesh_rx` | mesh RX counter |
+| 16 | `B` | `peer.mesh_send_count` | mesh send counter |
+| 17 | `i` | `peer.last_update` (0 if falsy) | last-seen tick |
+| 18 | `i` | `peer.last_coords_unix` (0 if None) | coords timestamp (s) |
+| 19 | `h` | `peer.distance_diff` (−1 if None) | distance delta |
+| 20 | `B` | flag byte B (see below) | peer visibility flags |
+| 21 | `b` | `peer.orientation` | orientation code |
+| 22 | `f` | `peer.volts` | peer battery voltage |
+
+| Flag byte | `pack_flags` bit order |
+| --- | --- |
+| A (field 6) | `sos, is_poi, is_mesh, is_stale, is_collected, 0, is_unknown, 0` |
+| B (field 20) | `is_hidden, is_locked, 0×6` |
+
+Log: `Sending BLE | DataTransfer (0x06, 0x02) for {}`.
+
+### Peer Sync — `(0x06, 0x07)` `gen_peer_sync`
+
+A peer-MAC list: `[0x06, 0x07, total_len & 255, peer_count, mac0(6), mac1(6), …]`
+(6-byte MACs, first at offset 4, +6 each).
+
+## ESP-NOW registry: `TOTEM_MSG_MAP`
+
+<Warning>
+Earlier docs decoded the qstr-immediate values with `>>2`, yielding bogus "handler
+names" (`disconn_animation`, `device_power`, `dev_info`, `dev_total_lightsleep_ms`,
+`disabled`, …). Those were **decode artifacts and are wrong**. ESP32 MicroPython
+(REPR_A) tags qstr-immediates as `(o & 7) == 2` with value `o >> 3`; under the correct
+`>>3` decode **every** `TOTEM_MSG_MAP` value is a struct format string.
+</Warning>
+
+`TOTEM_MSG_MAP` in `espnow_conn_v2.py` is a `(cat_id, cmd_id)`-keyed map (2-byte `bytes`
+key) whose values are the **ESP-NOW / mesh** payload struct formats. Recovered in full
+with the corrected `>>3` decode (**Confirmed**):
+
+| `(cat, cmd)` | Format | Size |
 | --- | --- | --- |
-| `(0x00, 0x00)` | `disconn_animation` | handler / type |
-| `(0x00, 0x01)` | `disconn_animation` | handler / type |
-| `(0x00, 0x02)` | `disconn_animation` | handler / type |
-| `(0x01, 0x00)` | `<BBB7bHbb` | payload struct (14 B) |
-| `(0x01, 0x02)` | `<BBiffHii` | payload struct (24 B) |
-| `(0x01, 0x05)` | `dev_total_lightsleep_ms` | handler / type |
-| `(0x01, 0x06)` | `<BBbbB` | payload struct (6 B) |
-| `(0x01, 0x07)` | `<3Bbb` | payload struct (5 B) |
-| `(0x02, 0x00)` | `dev_info` | handler / type |
-| `(0x03, 0x01)` | `device_power` | handler / type |
-| `(0x03, 0x02)` | `device_power` | handler / type |
-| `(0x07, 0x00)` | `disabled` | handler / type |
-| `(0x07, 0x01)` | `<BBHbffb` | payload struct (15 B) |
+| `(0,0)` / `(0,1)` / `(0,2)` | `<BBffbbhbbb6B` | 23 B |
+| `(1,0)` | `<BBB7bHbb` | 14 B |
+| `(1,2)` | `<BBiffHii` | 24 B |
+| `(1,5)` | `<BB9B8bhh4B` | 27 B |
+| `(1,6)` | `<BBbbB` | 5 B |
+| `(1,7)` | `<3Bbb` | 5 B |
+| `(2,0)` | `<BB6BffbbHbbbhhBBi` | 33 B |
+| `(3,1)` / `(3,2)` | `<BBHH4b4BHHBb` | 20 B |
+| `(7,0)` | `<BBffbbbHbbH` | 19 B |
+| `(7,1)` | `<BBHbffb` | 14 B |
 
-Beyond the three cleartext categories, the registry reveals category `0x00`
-(`disconn_animation`), `0x02` (`dev_info`), and `0x07` (power / `disabled`). A companion
-`EXTENDED` map adds schema-id variants — `(0x00, 0x00)` schemas 25 / 59 / 72,
-`(0x01, 0x06)` schemas 5 / 29, and `(0x02, 0x00)` schema 45 (schema 59 →
-`<BBffbbhbbb6Bhii4BhHehhffbB`, schema 72 → the same plus a `BiiBBb` tail).
+`EXTENDED` (schema-versioned variants, `(cat, cmd) → {schema_id → fmt}`):
 
-<Info>
-`TOTEM_MSG_MAP` is the `(cat_id, cmd_id)`-keyed **serialization / handler registry** — its
-values are payload `struct` format strings or handler / type names, not numeric labels. It
-does **not** contain category `0x06`: the **Peer** and **Peer Sync** frames
-`(0x06, 0x02)` / `(0x06, 0x07)` are handled by separate peer-sync logic, outside this map.
-The `Static Data` / `Live Data` names in the table above are cleartext log strings from
-`send_data_v2`, not values in this map.
-</Info>
+| `(cat, cmd)` | schema | Format | Size |
+| --- | --- | --- | --- |
+| `(0,0)` | 25 | `<BBffbbhbbb6B` | 23 B |
+| `(0,0)` | 59 | `<BBffbbhbbb6Bhii4BhHehhffbB` | 57 B |
+| `(0,0)` | 72 | `<BBffbbhbbb6Bhii4BhHehhffbBBiiBBb` | 69 B |
+| `(1,6)` | 5 | `<BBbbB` | 5 B |
+| `(1,6)` | 29 | `<BBbb9BBB3i` | 27 B |
+| `(2,0)` | 45 | `<BB6BffbbHbbbhhBBiffh` | 43 B |
+
+Every `<BB…` format leads with the echoed `(cat_id, cmd_id)`. The `(0,*)` 23-B family
+(`<BBffbbhbbb6B`) is the **mesh peer beacon**: two floats (lat/lon) + flags + 6-byte MAC —
+the ESP-NOW analogue of the BLE Peer records. A BLE-only client ignores this table.
+Field-by-field mesh semantics are **Partial** (not fully labelled).
+
+### ESP-NOW frame envelope
+
+On the radio these payloads sit inside an ESP-NOW application frame with a fixed
+**SyncWord** prefix and **no CRC** (**Confirmed**):
+
+```text
+0       2       3       4                    N
+│ A7 74 │ cat_id│ cmd_id│ payload (struct)   │
+│ Sync  │  u8   │  u8   │                    │
+```
+
+Frame validation = **SyncWord `0xA7 0x74` match + `len ≥ 4` + per-`(cat, cmd)`
+payload-size check**. There is **no checksum or CRC** on the ESP-NOW frame. (The rodata
+string `Invalid Checksum value for: {}` belongs to the u-blox UBX GNSS parser, not this
+path.) A mesh dedup UID (`uint16`) sits at mesh-frame offset 20.
 
 ## Message identity & lifetime
 
@@ -91,8 +252,8 @@ Mesh/peer messages are de-duplicated and expired:
 
 | Symbol | Role |
 | --- | --- |
-| `gen_msg_uid` | generate a unique id per message |
-| `MSG_EXP_MSECS` | message expiry window |
+| `gen_msg_uid` | generate a unique id per message (`uint16 randint(1, 65534)`) |
+| `MSG_EXP_MSECS` | message expiry window (150000 ms) |
 | `MSG_IN_BUFF`, `MSG_OUT_BUFF` | inbound / outbound message buffers |
 | `msg_interval_ms`, `msg_offset_ms` | send scheduling |
 | `MESH_PEER_MSG_LIMIT` | per-peer message cap |
@@ -103,40 +264,52 @@ This lets a message flood the mesh once and be dropped as a duplicate on re-rece
 
 ## Chunking
 
-Payloads larger than the link MTU are fragmented by a common chunking layer
-(`f_ble/chunking.py`). The relevant constants:
+Payloads larger than the link buffer (185 B data-characteristic value) are fragmented by
+a common chunking layer (`f_ble/chunking.py`). The relevant constants:
 
 | Symbol | Role |
 | --- | --- |
 | `CHUNK_HDR_FMT` | `struct` format of the per-chunk header |
 | `CHUNK_HDR_SZ` | header size in bytes |
-| `CHUNK_BUFF_SZ` | chunk buffer size |
+| `CHUNK_BUFF_SZ` | chunk buffer size (247) |
 | `FrameSchemaId` | negotiated frame schema per connection |
 
-The chunk header prefixes each fragment. Its format and field order are now recovered from
-the live `struct.pack_into` call in `chunking.gen_transfer_buff`:
-`CHUNK_HDR_FMT` = `<HBBBiHiB` (**`CHUNK_HDR_SZ` = 16 bytes**), written at **offset 2** of
-the transfer buffer (`buff[0]` / `buff[1]` are a separate 2-byte frame prefix).
+The chunk header prefixes each fragment. Its format and field order are recovered from
+the live `struct.pack_into` call in `chunking.gen_transfer_buff`: `CHUNK_HDR_FMT` =
+`<HBBBiHiB` (**`CHUNK_HDR_SZ` = 16 bytes**), written at **offset 2** of the transfer
+buffer (`buff[0] = 2`, `buff[1] = 2` are a separate 2-byte frame prefix).
 
-| # | code | Field | Type |
-| --- | --- | --- | --- |
-| 1 | `H` | `file_id` | uint16 LE |
-| 2 | `B` | `status_id` | uint8 |
-| 3 | `B` | `action_id` | uint8 |
-| 4 | `B` | `file_type_id` | uint8 |
-| 5 | `i` | `byte_pos` | int32 LE |
-| 6 | `H` | `chunk_no` | uint16 LE |
-| 7 | `i` | `file_size` | int32 LE |
-| 8 | `B` | reserved (packed as `0`) | uint8 |
+| # | code | Field | Type | Meaning |
+| --- | --- | --- | --- | --- |
+| 1 | `H` | `file_id` | uint16 LE | `= sha256[0] \| sha256[1]<<8` |
+| 2 | `B` | `status_id` | uint8 | transfer status (see below) |
+| 3 | `B` | `action_id` | uint8 | transfer action (see below) |
+| 4 | `B` | `file_type_id` | uint8 | content type (see below) |
+| 5 | `i` | `byte_pos` | int32 LE | byte offset of this chunk in the file |
+| 6 | `H` | `chunk_no` | uint16 LE | chunk index |
+| 7 | `i` | `file_size` | int32 LE | total file size (bytes) |
+| 8 | `B` | reserved (packed as `0`) | uint8 | literal 0 |
 
-The format string and field order are **Confirmed** (decoded from the pack opcode stream);
-the `CHUNK_HDR_FMT` name→value binding is **Inferred (high confidence)** — `<HBBBiHiB` is
-`chunking`'s only `struct` format and the value imported elsewhere as `CHUNK_HDR_FMT`, but
-no literal `CHUNK_HDR_FMT = "…"` assignment was seen in the frozen bytecode.
+After the 16-byte header: `buff[18:50]` = 32-byte SHA-256 (when set); `buff[50]` =
+`name_len`, then the UTF-8 file name; then a trailing `err_no` byte.
 
 The header carries **`file_size`** (the total file size), **not** a per-chunk size. Chunk
 size appears only in the per-chunk log line below (`Chunk Size: {}`), never in
 `CHUNK_HDR_FMT`.
+
+### Header enums (Confirmed)
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `status_id` | `1` | normal / in-progress |
+| `status_id` | `4` | error / abort |
+| `action_id` | `0` | header / announce |
+| `action_id` | `1` | last-chunk / complete |
+| `file_type_id` | `2` | upload-to-app |
+
+`file_id` is derived from the file's SHA-256: `file_id = sha256[0] | sha256[1] << 8`
+(u16). The transfer *destination* enum is separate (`SAVE_TO_VFS = 1`, `SAVE_TO_OTA = 2`).
+Only `file_type_id = 2` was observed on the app-upload path; other values are **Partial**.
 
 ## File transfer
 
@@ -148,53 +321,33 @@ Chunk No: {}/{} | Pct: {:.3f} | File ID: {} | Chunk Size: {} |
 Byte Pos: {} | File Size: {} | Run Time: {} | Latency: {} | len: {} | queued: {}
 ```
 
-Control flow (from `[Upload]` logs):
+### App→device reply header (`FileUploader.on_header`)
+
+The app replies with an 18-byte header, `struct <BBHbBBiHiB` (**Confirmed**, guarded by
+`len(data) >= 18`). Used fields: `file_id = t[2]` (`H`, matched to the device's
+`file.file_id`), `status = t[3]` (`b`), `action = t[4]` (`B`), `chunk = t[7]` (`H`).
+Log: `[Upload] App header | status: {} | action: {} | chunk: {} | err: {}`.
+
+| App field | Value | Meaning |
+| --- | --- | --- |
+| `status` | `∈ {2, 3, 4}` | terminal result (`evt_app_result` set) |
+| `action` | `4` | RESUME at `chunk` (`resume_chunk = chunk or 1`) |
+| `action` | `1` | READY / proceed |
+
+### Control flow
 
 | Event | Meaning |
 | --- | --- |
-| `App header | status: {} | action: {} | chunk: {} | err: {}` | transfer control frame |
+| `App header \| status: {} \| action: {} \| chunk: {} \| err: {}` | transfer control frame |
 | `Resuming at chunk {}` | resume an interrupted transfer |
 | `Chunk {} acknowledged successfully` | per-chunk ACK |
 | `Ignoring header for file_id {} (in flight: {})` | de-dupe concurrent transfers |
-| `Streamed {} B in {} chunks | {} ms` | completion summary |
-| result codes | `1=done 2=no app 3=retry 4=failed 5=cancel 6=abort` |
+| `Streamed {} B in {} chunks \| {} ms` | completion summary |
+
+### Result codes (Confirmed)
+
+`RES_DONE = 1`, `RES_NO_APP = 2`, `RES_RETRY = 3`, `RES_FAILED = 4`, `RES_CANCEL = 5`,
+`RES_ABORT = 6`.
 
 Named files moved over this path include `content.json`, `config.json`, `commslog.bin`,
 `ble_keys.bin`, `debug.bin`, and AssistNow GNSS data (`assist-now-b.bin`).
-
-## Struct catalog (wire layouts)
-
-Payloads are packed with Python `struct`. The firmware's format strings are recovered
-verbatim; each defines a byte-exact record. A representative selection:
-
-| Format | Fields (struct codes) | Likely use |
-| --- | --- | --- |
-| `<BBB` | cat_id, cmd_id, +1 byte | short header-prefixed record |
-| `<BBHbBBiHiB` | mixed bytes/half/int | a live-data / status record |
-| `<ffbb...` (e.g. `<ffbb`, `<ffbBih`) | two floats + flags | lat/lon (float32) + flags |
-| `<BBffbbbHbbH` | 2 bytes + 2 floats + flags | position + metadata record |
-| `<biHBBBbBBBbhhiiibbb` | wide mixed record | full peer/nav telemetry |
-
-<Note>
-Dozens of distinct formats are present (see the reference data in the repo). Floats
-(`f`) **often** appear in pairs, matching latitude/longitude, but the pairing is not
-universal — some records carry a lone or triple float (e.g.
-`<bfi3fb4Bi3b2hbiffb3ibHBBb`: a single `f`, then a `3f` group). The leading `BB` matches
-the `(cat_id, cmd_id)` header.
-</Note>
-
-Several exact format ↔ `(cat_id, cmd_id)` bindings are now recovered from `TOTEM_MSG_MAP`
-and its `EXTENDED` companion (**Confirmed**):
-
-| `(cat_id, cmd_id)` | Format | Size |
-| --- | --- | --- |
-| `(0x01, 0x00)` | `<BBB7bHbb` | 14 B |
-| `(0x01, 0x02)` | `<BBiffHii` | 24 B |
-| `(0x01, 0x06)` | `<BBbbB` | 6 B |
-| `(0x01, 0x07)` | `<3Bbb` | 5 B |
-| `(0x07, 0x01)` | `<BBHbffb` | 15 B |
-| `(0x00, 0x00)` schema 59 | `<BBffbbhbbb6Bhii4BhHehhffbB` | 57 B |
-| `(0x00, 0x00)` schema 72 | `<BBffbbhbbb6Bhii4BhHehhffbBBiiBBb` | 69 B |
-
-Binding the **remaining** formats to a specific message still requires further bytecode
-disassembly, but the byte layouts themselves are fully recovered.

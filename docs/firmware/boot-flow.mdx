@@ -38,11 +38,11 @@ states and transitions (from log strings and symbols):
 | Concept | Values / evidence |
 | --- | --- |
 | App `boot_mode` | `BOOT_POWER_ON`, `BOOT_SHUTDOWN` — app-level values, distinct from the ESP reset cause below |
-| Desired boot mode | `Power Control | Desired boot_mode: {}` |
+| Desired boot mode | `Power Control \| Desired boot_mode: {}` |
 | Power mode | app aliases `PM_PERF` / `PM_PWRSAVE` mapped to the ESP32 esp_pm tiers `PM_PERFORMANCE` / `PM_POWERSAVE`, with `is_power_perf` / `is_power_constant` / `is_power_down` / `is_powered` state flags; switch logged as `Changing power mode from {} to: {}`. Numeric enum ids are not string-extractable. |
 | Eco / idle profile | timed low-activity profile (`eco_mode_sec`, `is_eco_mode`, `evt_idle`) plus a peripheral power gate (`pwr_gate_pin`) |
 | Battery health | `Changing battery health to: {}`; confirmed health signals are the events `evt_battery_charged` and `evt_battery_usable` (the full enum is not string-extractable). Low battery first locks out features (`Battery too low for BLE`, `Battery too low for OTA update`) before the hard low-voltage cutoff. |
-| Low-voltage cutoff | `Voltages too low, powering down | {}v` |
+| Low-voltage cutoff | `Voltages too low, powering down \| {}v` |
 
 ### Reset cause vs. boot-loop protection
 

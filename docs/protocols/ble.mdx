@@ -11,22 +11,36 @@ client (`Starting OTA Bluetooth connection`). The stack is NimBLE (via MicroPyth
 
 ## GATT identifiers
 
-Custom 128-bit UUIDs recovered verbatim from the image:
+Custom 128-bit UUIDs recovered verbatim from the image. There is **one service and two
+characteristics** (`ble_core.py` `BleCore` builds exactly two; `f_ble/ble_data.py` sets the
+flags):
 
-| UUID | Role (inferred) |
-| --- | --- |
-| `7913b588-0000-4635-b066-baa2cfc197cf` | transfer service base |
-| `7913b588-0001-4635-b066-baa2cfc197cf` | characteristic (e.g. RX / write) |
-| `7913b588-0002-4635-b066-baa2cfc197cf` | characteristic (e.g. TX / notify) |
+| UUID | device attr | Role |
+| --- | --- | --- |
+| `7913b588-0000-4635-b066-baa2cfc197cf` | `service` | primary transfer service |
+| `7913b588-0001-4635-b066-baa2cfc197cf` | `chars__conn_status` | control / handshake — client writes here |
+| `7913b588-0002-4635-b066-baa2cfc197cf` | `chars__data_transfer` | application data |
 
-The `7913b588-000x` family uses an incrementing **second 16-bit group** for the service
-(`0000`) and its characteristics (`0001`, `0002`) — the standard write/notify pair for a
-chunked serial-style transport. Transfer is implemented in `svc_ble_transfer.py`.
+Both characteristics register with the **same flags `0x3E`** =
+`READ | WRITE_NO_RESPONSE | WRITE | NOTIFY | INDICATE`
+(`0x02 | 0x04 | 0x08 | 0x10 | 0x20`; `add_characteristic` in `f_ble/ble_lite.py` passes
+`range/values/write_nr/notify/indicate` all defaulting to `True`, and
+`Characteristic.__init__` ORs the matching bit for each; no encrypted/authenticated
+permission variants are ORed in). Clients should **scan and connect by the service UUID
+`7913b588-0000-4635-b066-baa2cfc197cf`** — the advertised local name is built at runtime and
+should not be relied on. Transfer is implemented in `svc_ble_transfer.py`.
+
+<Note>
+  A `chars__on_demand` attribute name is referenced once (`ble.chars__on_demand` in
+  `f_ble/file_upload.py`) but is **never assigned** in the frozen modules and has **no
+  `…-0003` UUID** — `BleCore` registers only the two characteristics above. Treat it as
+  legacy/unreachable, not a third GATT characteristic to discover.
+</Note>
 
 <Note>
   `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` also appears in the image but is **not** a BLE
   UUID — it is the RFC 6455 WebSocket handshake magic GUID used by MicroPython's WebREPL.
-  There are exactly three BLE UUIDs, all in the `7913b588` family.
+  Every Totem BLE UUID is in the `7913b588` family.
 </Note>
 
 ## Advertising
@@ -61,25 +75,75 @@ last blocker clears. A separate **scheduled-disconnect manager** (`ble_schedule_
 
 ## Connection handshake
 
+<Info>
+  **No pairing, bonding, or encryption is required.** The characteristics register with plain
+  flags `0x3E` only; the firmware never calls `ble.config()` with any security option
+  (no bond / mitm / le_secure / io_capability) and the IRQ handler has no passkey or encryption
+  events. An **unpaired custom central can read, write, and subscribe** — the only gate to data
+  flow is the application-layer handshake below.
+</Info>
+
 Once connected, the two sides negotiate before app data flows:
 
 <Steps>
+  <Step title="Connect by service UUID">
+    Scan for and connect to `7913b588-0000-4635-b066-baa2cfc197cf`; discover its two
+    characteristics.
+  </Step>
   <Step title="MTU exchange">
-    `Current MTU: {}` — determines chunk size for the transfer layer.
+    `Current MTU: {}` — client-negotiated; aim for ≥ ~188 so a full data frame fits in one PDU
+    (the data value buffer is 185 bytes; larger payloads use the chunking protocol). Determines
+    chunk size for the transfer layer.
   </Step>
-  <Step title="Connection mode / frame schema">
-    `=== BLE Connection Mode: {} | FrameSchemaId: {}` — selects the framing schema
-    used for the rest of the session.
+  <Step title="Subscribe">
+    Enable notifications / indications so the device can push data (`gatts_notify` /
+    `gatts_indicate` on **conn handle 0** — the app is the only central).
   </Step>
-  <Step title="ConnStatus Ready">
-    The central signals readiness. Until then the device holds off:
-    `ConnStatus Ready command not yet received, not sending BLE updates`.
+  <Step title="Send the ConnStatus Ready frame">
+    Write the 4-byte frame to `chars__conn_status` (`…-0001`) — see below. Until it arrives the
+    device holds off: `ConnStatus Ready command not yet received, not sending BLE updates`.
+    Logged as `=== BLE Connection Mode: {} | FrameSchemaId: {}`.
   </Step>
   <Step title="Data transfer">
-    Messages flow as `(cat_id, cmd_id)` records (Static, Live, Peer). See
-    [message format](/protocols/message-format).
+    Messages flow on `chars__data_transfer` (`…-0002`) as `(cat_id, cmd_id)` records (Static,
+    Live, Peer). See [message format](/protocols/message-format).
   </Step>
 </Steps>
+
+### ConnStatus Ready frame
+
+To unblock app-data flow the client writes this exact 4-byte frame to `chars__conn_status`
+(`…-0001`):
+
+`[0x00, 0x01, conn_mode, frame_schema_id]`
+
+| Byte | Field | Effect |
+| --- | --- | --- |
+| `0x00` | `cat_id` | Connection Status |
+| `0x01` | `cmd_id` | CONNECTED / READY → sets `is_app_conn` |
+| `conn_mode` | `conn_mode = msg[2]` | `conn_mode == 1` sets **TX ownership** (`evt_is_tx_owner`) |
+| `frame_schema_id` | `frame_schema_id = msg[3]` | **any nonzero** value sets the **TX-ready** gate (`evt_is_tx_ready`) |
+
+The TX-ready gate is exactly `frame_schema_id > 0`, so **any nonzero last byte opens it** —
+there is no allowlist of ids in `recv_status_msgs`. Use a real schema id so the extended
+records you later exchange match a known struct format: the `EXTENDED` map
+(`espnow_conn_v2.py`) defines **`25`, `45`, `59`, `72`** (among others). **Both gates must be
+set** before the device transmits: with only one set it logs
+`[send_data_v2] | is_tx_owner not set` or `[send_data_v2] | is_tx_ready not set`, and before
+any Ready frame arrives it logs `ConnStatus Ready command not yet received, not sending BLE
+updates`. A minimal working Ready frame is therefore `[0x00, 0x01, 0x01, 0x19]` (schema id 25),
+or as little as `[0x00, 0x01, 0x01, 0x01]`.
+
+To end the session, write `[0x00, 0x03]` — a graceful-disconnect request (sets
+`ble_conn.is_graceful_disconn`).
+
+<Note>
+  **Confidence:** the 4-byte Ready frame, `conn_mode == 1` → TX owner, and the TX-ready gate
+  `frame_schema_id > 0` are all **Confirmed** from the `recv_status_msgs` opcodes (the
+  comparison is a plain `> 0`, not a table lookup). `25 / 45 / 59 / 72` are real ids from the
+  `EXTENDED` map; which id the app default-sends is not pinned, but any nonzero value unblocks
+  the gate.
+</Note>
 
 ## Half-duplex & comms handoff
 
@@ -100,17 +164,30 @@ app-facing BLE path (`last_handoff_to_app`) and the peer-facing ESP-NOW path
 (`Wait for ESP-NOW Comms to be sent before sending BLE message`). The watchdog guarantees
 liveness if an owner stalls.
 
+Beyond the initial Ready frame, the app can explicitly move ownership by writing a **cat-4
+handoff frame** to `chars__conn_status` (`…-0001`): `[0x04, 0x03, flags]`, where `flags`
+**bit 1 grants** (sets both `evt_is_tx_owner` and `evt_is_tx_ready`) and **bit 0 revokes**
+(clears both). This is the sustained half-duplex TX-ownership grant/revoke; `recv_status_msgs`
+also steps the `ble_handoff_wd` watchdog on each grant.
+
 ## Keys & bonding
+
+<Warning>
+  Bonding is **optional and not required** for the phone-app link. The firmware never forces
+  pairing on the app connection — an unpaired central works. The infrastructure below only
+  persists optional reconnect secrets.
+</Warning>
 
 BLE bonding keys are persisted in `ble_keys.bin`. Secrets are cached in RTC memory and
 written through to VFS in a two-tier restore (`Saving BLE secrets to rtc memory`,
 `Saving BLE secrets to VFS`, `BLE secrets found in RTC memory, saving to VFS`,
 `Checking for BLE secrets on VFS`; `save_ble_secrets`, `restore_ble_secrets_vfs`,
-`add_secret`), so bonds survive resets.
+`add_secret`), so bonds can survive resets when used.
 
-App pairing / passkey handshake uses `gap_pair`, `gap_passkey`, `is_pairing`,
-`cancel_pairing`. The separate `add_new_bond` / `create_promo_bond` symbols belong to the
-**Totem-to-Totem** peer auto-bonding mechanism (`[create_promo_bond] Created Bond!`,
+The `gap_pair`, `gap_passkey`, `is_pairing`, `cancel_pairing` symbols exist in the image but
+are never invoked from the app connect path (the IRQ handler has no passkey/encryption branch).
+The separate `add_new_bond` / `create_promo_bond` symbols belong to the **Totem-to-Totem**
+peer auto-bonding mechanism (`[create_promo_bond] Created Bond!`,
 `Creating promo activation bond`, `is_promo_bond`) — see the mesh
 [peer bonding](/protocols/espnow-mesh) page, not app pairing.
 

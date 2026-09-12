@@ -14,19 +14,29 @@ The sender side is a designated/enabled **"demi daemon"** device role
 
 ## Command set
 
-The five `demigod_gen_*` helpers wrap a generic `gen_demi_god` message builder. ESP-NOW
-frames are typed by a **category** (`cat_id`) plus a **command** (`cmd_id`): demigod
-occupies a category, and each generator sets a specific `cmd_id`. Every message requires a
-command id (`A cmd_id must be provided for demi-god messages`). The numeric `cat_id` /
-`cmd_id` values are frozen-bytecode constants and are **not determinable** from strings.
+A generic builder `gen_demi_god(cmd_id, …)` (a `msgr` method in `espnow_conn_v2`) writes a
+4-byte frame header — **SyncWord** `A7 74` (`b'\xa7\x74'`) + **`cat_id` = 1** (demigod's
+ESP-NOW category) + the caller-supplied **`cmd_id`** — then dispatches by `cmd_id` to one of
+five `demigod_gen_*` payload packers (in `espnow_msg`), each of which `struct.pack_into`s its
+fields starting at frame offset 4. Every message requires a command id
+(`A cmd_id must be provided for demi-god messages`).
 
-| Generator | Effect |
-| --- | --- |
-| `demigod_gen_ota_update` | tell nearby devices to update firmware (`Demigod to update nearby devices`) |
-| `demigod_gen_pwr_control` | power control: power off (`send_pwr_off_cmd`, `Sending demigod command to power down`), reboot (`device_reboot`), or power-mode change (`Changing power mode from {} to: {}`) |
-| `demigod_gen_find_device` | make a target device identify itself (locate) |
-| `demigod_gen_add_nav_log_rule` | push a navigation-logging rule to devices |
-| `demigod_gen_venu_code` | set a venue / event code |
+The `cat_id` / `cmd_id` values **are** recovered from the frozen bytecode — the `cmd_id ==`
+dispatch branches in `gen_demi_god` and the leading `<BB` of each `TOTEM_MSG_MAP` entry.
+Demigod is `cat_id = 1`, and the per-command `cmd_id` and wire format are:
+
+| Generator | `cmd_id` | (cat, cmd) | Frame format after SyncWord | Effect |
+| --- | --- | --- | --- | --- |
+| `demigod_gen_ota_update` | 0 | (1, 0) | `<BBB7bHbb` | tell nearby devices to update firmware (`Demigod to update nearby devices`) |
+| `demigod_gen_add_nav_log_rule` | 2 | (1, 2) | `<BBiffHii` | push a navigation-logging rule to devices |
+| `demigod_gen_find_device` | 5 | (1, 5) | `<BB9B8bhh4B` | make a target device identify itself (locate) |
+| `demigod_gen_pwr_control` | 6 | (1, 6) | `<BBbb9BBB3i` (extended schema 29; base schema 5 = `<BBbbB`) | power control: power off (`send_pwr_off_cmd`, `Sending demigod command to power down`), reboot (`device_reboot`), or power-mode change (`Changing power mode from {} to: {}`) |
+| `demigod_gen_venu_code` | 7 | (1, 7) | `<3Bbb` | set a venue / event code |
+
+The **Frame format after SyncWord** column is the `struct` format applied at `frame[2:]`
+(`cat_id`, `cmd_id`, then payload) — identical to the receiver's `TOTEM_MSG_MAP[(cat, cmd)]`
+entry. `send_msg` broadcasts to the all-ones MAC `FF:FF:FF:FF:FF:FF` (`manager` adds it as a
+peer), repeated `send_count` (default 10) times at 200 ms spacing.
 
 ## Lifecycle
 
@@ -34,7 +44,7 @@ command id (`A cmd_id must be provided for demi-god messages`). The numeric `cat
 sequenceDiagram
   participant D as Demi-god (sender)
   participant T as Nearby Totems
-  D->>T: broadcast demi-god command (cat_id + cmd_id + payload)
+  D->>T: broadcast demi-god command (SyncWord A7 74 + cat_id=1 + cmd_id + payload)
   D->>D: evt_demigod_tx_done (sender-side, event bus)
   T->>T: within RSSI threshold + qualified? (Device disqualified from demigod command)
   T->>T: already seen this msg? (dedupe by msg uid)
@@ -66,16 +76,20 @@ device was tested.
   commands must therefore be **in the application payload**, not provided by the radio.
 - Commands are powerful (mass OTA, power-off, locate). The only message validation
   evidenced is a fixed **SyncWord + length** check
-  (`Invalid ESP-NOW message SyncWord or length`) plus a **non-cryptographic checksum/CRC**
-  (`Invalid Checksum value for: {}`,
-  qstrs `crc32` / `crc8`) — a SyncWord is a public framing marker, not a secret. An
+  (`Invalid ESP-NOW message SyncWord or length`) — SyncWord match plus `len >= 4` plus a
+  per-`(cat,cmd)` payload-size check. There is **no CRC or checksum** on the ESP-NOW /
+  demi-god frame; the `Invalid Checksum value for: {}` string belongs to the u-blox UBX
+  GNSS parser (a Fletcher-8 CK_A/CK_B check near `calc_ubx_checksum` / `parse_ubx`), not
+  this path. The SyncWord is the fixed value `A7 74` (`b'\xa7\x74'`) shared by **all**
+  ESP-NOW frames — peer, mesh, and demigod alike — a public framing marker, not a secret. An
   exhaustive negative search found **no** signature / HMAC / nonce / challenge / token
   string tied to demigod or the ESP-NOW app path (the only such strings belong to the
   TLS/mbedTLS stack, BLE bonding, and the WiFi driver). So the string/symbol evidence
   indicates demi-god commands are **unauthenticated at the application layer**; the
   RSSI-proximity gate and replay suppression are the visible safeguards, and neither
-  authenticates the sender. The exact wire layout would still need bytecode/const-table
-  decode to fully confirm.
+  authenticates the sender. The wire layout is now decoded (see the frame-format table
+  above): a 4-byte `SyncWord + cat_id + cmd_id` header followed by a per-command `struct`
+  payload, with no authentication field.
 - The `venu_code` command distributes a plaintext grouping/identifier value to co-located
   devices (adopted only when the sender is within the RSSI threshold —
   `Venue Code Skipped, RSSI outside threshold: {} to {}`), used to scope subsequent mesh / smart-group behavior.

@@ -74,7 +74,7 @@ registry); roles are inferred from symbols, string constants, and log lines.
 | --- | --- |
 | `ble_controller.py` | high-level BLE control (`BleCtrl`, blockers) |
 | `ble_core.py` | core BLE glue |
-| `ble_manager.py` | connection/session manager |
+| `ble_manager.py` | connection/session manager (`BleManager`, `send_data_v2`, `gen_live_data`) |
 | `svc_ble_transfer.py` | chunked transfer GATT service |
 | `ota_ble.py` | OTA over BLE |
 
@@ -83,8 +83,8 @@ registry); roles are inferred from symbols, string constants, and log lines.
 | Module | Role |
 | --- | --- |
 | `espnow.py` | ESP-NOW wrapper/shim (origin uncertain; stock MicroPython ships `espnow` as a C module) |
-| `espnow_conn_v2.py` | connection/session layer |
-| `espnow_msg.py` | message model (`cat_id`/`*_cmd_id`, `TOTEM_MSG_MAP`) |
+| `espnow_conn_v2.py` | connection/session layer; message schema maps (`TOTEM_MSG_MAP`, `EXTENDED`, `COMM_SPEED`) |
+| `espnow_msg.py` | ESP-NOW message builders (`*_gen_*` payload generators, `pack_flags`, `rot13`) |
 | `aioespnow.py` | asyncio ESP-NOW (`AIOESPNow`) |
 | `peer_auto_bond.py` | automatic peer bonding |
 | `peer_helpers.py` | peer utilities |
@@ -94,7 +94,7 @@ registry); roles are inferred from symbols, string constants, and log lines.
 
 | Module | Role |
 | --- | --- |
-| `data_upload_v2.py` | app data upload (`send_data_v2`) |
+| `data_upload_v2.py` | app data upload over WiFi/HTTP (`UploadData`, `upload_file`, `API_ENDPOINT`) |
 | `ota_block_writer.py` | write image chunks to the OTA slot |
 | `ota_callback.py` | OTA progress/state callbacks |
 | `ota_daemon.py` | background OTA task |

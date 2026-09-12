@@ -50,10 +50,11 @@ Reusable infrastructure used by everything above it.
 
 | Module | Role |
 | --- | --- |
-| `peripheral.py` | GATT peripheral, advertising, connection lifecycle |
-| `ble_lite.py`, `ble_data.py` | message model: `(cat_id, cmd_id)` + payload |
-| `chunking.py` | fragmenting large payloads over the MTU into chunks |
-| `file_upload.py` | chunked file transfer with resume/ACK |
+| `peripheral.py` | builds the BLE advertising payload (`gen_advertise_payload`) |
+| `ble_lite.py` | `BleLite` GATT peripheral: `advertise`/`advertise_burst`, `enable`/`disable`, `register_services`, `add_characteristic`, connection lifecycle (`irq_cb`, `disconnect`) |
+| `ble_data.py` | GATT data types: `Characteristic` (flag bits), `Service`, `Conn` (connection status), `BleErr` |
+| `chunking.py` | fragmenting large payloads into chunks (`FileTransfer`, `gen_transfer_buff`, `download_ota`/`download_vfs`) |
+| `file_upload.py` | chunked file transfer with resume/ACK (`FileUploader`: `request`, `_send_header`, `_stream`, pause gates) |
 
 ### `f_ota/` — update engine
 

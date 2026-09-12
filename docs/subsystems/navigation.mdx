@@ -15,7 +15,7 @@ The receiver is a **u-blox** module spoken to over the **UBX** binary protocol.
 | Element | Evidence |
 | --- | --- |
 | UBX framing | `UBLOX_MSG_PREFIX`, `UBLOX_MSG_SIZE`, `calc_ubx_checksum` |
-| Position solution | `NAV-PVT` (`last_nav_pvt`, `last_nav_pvt_raw`); 92-byte payload → u-blox M8/M9/M10-class receiver |
+| Position solution | `NAV-PVT` (`last_nav_pvt`, `last_nav_pvt_raw`); parsed with `<IHBBBBBBIiBBBBiiiiIIiiiiiIIHHBBBBihH` (calcsize 92) → u-blox M8/M9/M10-class receiver |
 | Version query | `MON-VER` |
 | Ack / nak | `ACK-ACK`, `ACK-NAK` |
 | Rate control | `modify_nav_rate` |
@@ -24,7 +24,7 @@ The receiver is a **u-blox** module spoken to over the **UBX** binary protocol.
 A representative fix log:
 
 ```text
-{} | Gnss time: {} | {:.7f}, {:.7f} | pAcc: {:.2f} |
+{} | Gnss time: {} | {:.7f}, {:.7f} | pAcc: {:.2f} | 
 ```
 
 (7-decimal latitude/longitude ≈ centimetre resolution; `pAcc` is the receiver's own
@@ -74,11 +74,11 @@ declination.
 | 2D and 3D calibration | `_switch_to_3d`, `Bias handoff 2D->3D`, `_CAL3D_MAX_ACCEL_DEV` |
 | Sample collection | `--- Magnetic Calibration Samples ---` |
 | Quality metric | `gap_xy={:.1f}uT` (residual field gap in microtesla) |
-| Persistence | `2D bias restored from config | age={}s | cals={}` |
-| Finish / fail | `_finish_calibration`, `calibration failed`, `_last_calibrated` |
+| Persistence | `2D bias restored from config \| age={}s \| cals={}` |
+| Finish / fail | `_finish_calibration`, `_last_calibrated`; a rejected 3D fit logs `3D cal rejected: mag={:.1f} std={:.1f} cov={:.2f} change={:.1f}` |
 
 The 2D→3D "bias handoff" upgrades from a flat-plane heading to a full 3D solution once
-enough motion is seen: `Bias handoff 2D->3D ({}) | gap_xy={:.1f}uT | 2D age={}s`.
+enough motion is seen: `Bias handoff 2D->3D ({}) | gap_xy={:.1f}uT | 2D age={}s | cals={}`.
 
 ### Declination (World Magnetic Model)
 
@@ -104,7 +104,7 @@ The compass surface the UI consumes:
 | Output | Evidence |
 | --- | --- |
 | Tilt-compensated heading | `heading_tilt_compensated`, `heading_tilt_compensated_deg` (degrees) |
-| Motion heading | `get_heading_mot` — heading-of-motion from the NAV-PVT `headMot` field; `get_azimuth`, `avg_azimuth`, `peer_azimuth` |
+| Motion heading | `get_heading_mot` — course-over-ground computed by `get_azimuth` between the previous and current GNSS fix (`location_prev`→`location`), gated by `odometer` ≥ 10000 (there is no NAV-PVT `headMot` field); `avg_azimuth`, `peer_azimuth` |
 | Compass lock | `is_compass_lock`, `toggle_compass_lock`; logs `Compasss Lock Enabled`, `Turning ON compass lock` / `Turning OFF compass lock` |
 
 ## Navigation logging

@@ -1,6 +1,6 @@
 ---
 title: "ESP-NOW mesh (Unity Mesh)"
-description: "The Totem-to-Totem 2.4 GHz protocol: bonding, peer sync, encryption, and relay."
+description: "The Totem-to-Totem 2.4 GHz protocol: framing, bonding, peer sync, and relay."
 ---
 
 The **Unity Mesh Network** is Totem-to-Totem communication built on **ESP-NOW** —
@@ -15,10 +15,51 @@ without an access point. Implemented in `espnow.py`, `espnow_conn_v2.py`,
 - **Direct + broadcast**: unicast to a bonded peer, or broadcast for discovery and
   [demi-god](/protocols/demigod) commands.
 
+## Application frame
+
+Every ESP-NOW frame — unicast and broadcast alike — begins with a fixed 2-byte
+**SyncWord** followed by a category/command header, then a payload whose layout is
+selected by the `(cat_id, cmd_id)` pair (see [message format](/protocols/message-format)).
+
+```text
+byte   0    1    2      3       4 .. N
+      +----+----+------+-------+-----------------------------+
+      | A7 | 74 |cat_id|cmd_id | payload (per (cat,cmd) map) |
+      +----+----+------+-------+-----------------------------+
+       SyncWord  \_____ 2B ____/
+```
+
+| Field | Offset | Value | Grade |
+| --- | --- | --- | --- |
+| SyncWord | `[0:2]` | bytes `0xA7 0x74` (on the wire: `0xA7` then `0x74`) | Confirmed |
+| `cat_id` | `[2]` | uint8 category | Confirmed |
+| `cmd_id` | `[3]` | uint8 command | Confirmed |
+| payload | `[4:]` | struct selected by `(cat_id, cmd_id)` | Confirmed |
+
+**Validation is SyncWord match + length only — there is no CRC or checksum on the ESP-NOW
+frame.** A receiver rejects any frame shorter than 4 bytes or not beginning with
+`0xA7 0x74`, then validates the payload against the per-`(cat,cmd)` struct size. There is
+no in-band length field: the receiver uses the ESP-NOW MAC frame length plus the expected
+struct size.
+
+```text
+Invalid ESP-NOW message SyncWord or length
+```
+
+<Note>
+Both `Invalid Checksum value for: {}` and
+`Invalid payload size for: {} | expected: {}, received: {} | Total Errs: {} / {}` belong to
+the u-blox UBX GNSS parser (`ubx_gnss`, a Fletcher CK_A/CK_B check), **not** the ESP-NOW path
+— the only validation log the ESP-NOW module (`espnow_conn_v2`) emits is
+`Invalid ESP-NOW message SyncWord or length`. A custom ESP-NOW client computes no checksum —
+prepend `0xA7 0x74`, set `cat_id`/`cmd_id`, and append the payload.
+</Note>
+
 ## Channel
 
-The mesh operates on a fixed **home channel**. A peer on a different channel is
-rejected outright:
+The mesh operates on a fixed **home channel — channel 6** (`self.channel = 6`, hardcoded in
+`espnow_conn_v2.__init__`; the only write to `self.channel` in the module — Confirmed). A peer
+on a different channel is rejected outright:
 
 ```text
 Peer channel is not equal to the home channel, send fail!
@@ -31,10 +72,18 @@ rather than being switched off. Because every peer must stay on the shared home 
 any WiFi activity that retunes the radio to another channel (for example a WiFi firmware
 download) would interrupt mesh delivery until the radio returns to the home channel.
 
-## Long-range mode
+## Long-range PHY
 
-The build supports ESP-NOW **long-range PHY rates** (`WIFI_PHY_RATE_LORA_250K`,
-`WIFI_PHY_RATE_LORA_500K`), trading throughput for range — useful across a large venue.
+In the ESP-NOW-only and ESP-NOW+BLE run-modes the radio PHY is **Espressif Long Range**
+(`WIFI_PROTOCOL_LR`, protocol bit 8), trading throughput for range across a large venue.
+The Wi-Fi-coexist modes (`MODE_ESP_NOW_WIFI`, `MODE_ESP_NOW_WIFI_BLE`) fall back to standard
+802.11 B/G/N (protocol bit 7). This means a non-Espressif NIC — or an ESP32 not put into LR
+mode — **cannot** exchange frames while the totem runs the common ESP-NOW-only / ESP-NOW+BLE
+modes: a client must be an Espressif device configured with `WIFI_PROTOCOL_LR` on channel 6.
+
+The app never calls `wlan.config(lorate=...)`, so the LR data rate (`WIFI_PHY_RATE_LORA_250K`
+vs `WIFI_PHY_RATE_LORA_500K`) is left at the ESP-IDF default (500K) — a client should leave
+it unset too. *(PHY: Confirmed; lorate rate: Partial — IDF default, not set by the app.)*
 
 ## Peers & bonding
 
@@ -47,10 +96,10 @@ phone). A bonded set of Totems is a friend group that syncs positions and messag
 | Auto-bond | `Autobonding to Peers`, `auto_bond_timeout`, `auto_bond_client_timeout`, `Abandoning auto-bond group` |
 | Promo bond | `[create_promo_bond] Created Bond!`, `Peer already exists` |
 | Re-bond | `Already a Peer, allow re-bonding` |
-| Proximity gate | `BONDING`, `BONDING_RSSI` (bond only when close enough) |
+| Proximity gate | `BONDING`; `BONDING_RSSI` = `-25` dBm, `SMART_GROUP_RSSI` = `-45` dBm, `PEER_CHECK_RSSI` = `-3` (bond only when close enough) — Confirmed |
 | Blacklist | `_PEER_BLACKLIST` |
 | Settle time | `CONN_SETTLE_MS` |
-| Limits | peer table capped by `MAX_TOTAL_PEER_NUM` / `MAX_ENCRYPT_PEER_NUM` (`Max ESP-NOW peers reached`); bonds capped by `max_bonds` (`Cannot have more than {} bonds`) — enforced, numeric values live in frozen bytecode (undetermined) |
+| Limits | ESP-NOW peer table capped at the C-module limits `MAX_TOTAL_PEER_NUM` / `MAX_ENCRYPT_PEER_NUM`; the frozen-Python guard rejects when `len(peers) > modes.max_peers` (`Max ESP-NOW peers reached`). Bonds capped by `max_bonds`, default **8** (`self.max_bonds = 8`; `Cannot have more than {} bonds`) — `max_bonds` value Confirmed |
 
 Bonding events drive LED animations: `anim_add_peer`, `anim_bonding_ctdwn`
 (countdown), `anim_peer_del_ctdwn`, `add_peer_animation`.
@@ -58,7 +107,7 @@ Bonding events drive LED animations: `anim_add_peer`, `anim_bonding_ctdwn`
 ### Smart Group (auto-bond join)
 
 Auto-bonding uses a broadcast **Smart Group** join protocol. A host broadcasts a Smart
-Group command that carries the sender's RSSI; a receiver within `SMART_GROUP_RSSI`
+Group command that carries the sender's RSSI; a receiver within `SMART_GROUP_RSSI` (`-45` dBm)
 registers the sender as a peer to bond to, then the two sides exchange bond bursts.
 Confirmed strings from the send/receive path:
 
@@ -86,28 +135,37 @@ sequenceDiagram
   A->>B: first bond burst
   B->>B: add_new_bond / create_promo_bond
   B-->>A: received remote bond
-  Note over A,B: each side programs the shared PMK / per-peer LMK locally (set_pmk / add_peer)
-  A->>B: encrypted peer sync (cat_id 0x06)
+  Note over A,B: each side registers the peer via add_peer(mac) — no keys, cleartext
+  A->>B: peer sync (cat_id 0x06, cleartext)
 ```
 
-## Encryption
+## Encryption — there is none
 
-Unicast peer traffic can be **encrypted** with ESP-NOW's PMK/LMK link encryption.
-Evidence from the IDF layer: `PMK is NULL`, `set lmk fail`, `Encrypt peer is full`,
-`Encryption Failed`, and `Do not support encryption for multicast address`. That last
-rule — the IDF forbidding encryption of multicast/broadcast frames — **confirms
-broadcast is unencrypted**. That **bonded unicast is encrypted** is a strong inference,
-not a proven fact: a PMK is programmed (`set_pmk`) and `MAX_ENCRYPT_PEER_NUM` is distinct
-from `MAX_TOTAL_PEER_NUM`, implying a mix of encrypted and unencrypted peers. Whether
-every unicast is encrypted or only bonded-peer unicast is not determined by this
-firmware.
+**All ESP-NOW traffic is cleartext — broadcast *and* unicast.** No PMK is ever
+programmed and no LMK is ever set, so the ESP-NOW link layer runs entirely unencrypted.
+This is confirmed, not inferred:
+
+- The ROM ESP-NOW C-module exposes `set_pmk`, `lmk`, and `encrypt`, but those qstrs appear
+  in **no frozen module's `qstr_table`** — no Python code ever references them.
+- `add_peer(mac)` is always called with a single positional argument, so `lmk` defaults to
+  `None` and `encrypt` defaults to `False`. The concept of ESP-NOW encryption exists in the
+  ROM module but is never used.
+- There is also **no application-layer authentication** on the ESP-NOW path — no token,
+  HMAC, challenge/response, or signature.
 
 <Warning>
-ESP-NOW encryption uses a 16-byte PMK plus per-peer LMKs. The keys themselves are
-derived/stored in bytecode and NVS and were not extracted. Broadcast frames (discovery,
-demi-god) are not encrypted by ESP-NOW; any application-layer protection on them is in
-the message payload.
+There is no confidentiality or authenticity on the mesh. Any Espressif device on channel 6
+in Long-Range mode can read every peer sync, position, and chat message and can inject
+valid frames. The only gates are RSSI proximity (for bonding) and msg-UID de-duplication —
+neither is a security control.
 </Warning>
+
+<Note>
+The IDF strings `PMK is NULL`, `set lmk fail`, `Encryption Failed`, and
+`Do not support encryption for multicast address` are the ESP-IDF ESP-NOW layer's own
+messages; their presence in the image does **not** mean the app uses encryption. The app
+never sets a PMK or LMK.
+</Note>
 
 ## Peer sync & relay
 
@@ -141,8 +199,21 @@ Node Slots disabled, relaying all (too few nearby nodes)
 
 When too few nodes are nearby, slotting is disabled and every frame is relayed. Origin
 and relay state is tracked per frame (`origin_mesh`, `originator`, `mesh_honored`,
-`mesh_relayed`). The numeric tunables (`max_hops`, `MESH_SLOTS_PER_NODE`,
-`MESH_MIN_HOP_RANGE`, `MESH_RELAY_MIN_DIST`) live in frozen bytecode and are undetermined.
+`mesh_relayed`).
+
+The mesh tunables are resolved from the frozen `project_data` module (and the `gen_mesh_msg`
+default for `max_hops`); all Confirmed from the disassembly:
+
+| Constant | Value | Role |
+| --- | --- | --- |
+| `max_hops` | `99` | max relay hops (default packed into each mesh frame) |
+| `MESH_SLOTS_PER_NODE` | `6` | relay slots per node for randomized backoff |
+| `MESH_MIN_HOP_RANGE` | `75` | hop-range gate (RSSI-derived) for relay suppression |
+| `MESH_RELAY_MIN_DIST` | `10` | min relay distance packed into the mesh frame |
+| `MESH_SEND_FREQ_MS` | `30000` | mesh re-send interval (ms) |
+| `MESH_PEER_MSG_LIMIT` | `999` | per-peer mesh message cap (flood control) |
+| `MESH_BUFF_SIZE` | `45` | mesh buffer size (`ENOW_MESH_BUFF = bytearray(45)`) |
+| `MSG_EXP_MSECS` | `150000` | message lifetime / de-dupe window (ms = 150 s) |
 
 ## What rides the mesh
 

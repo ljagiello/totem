@@ -9,6 +9,12 @@
     "dark": "#0FB5AE"
   },
   "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/ljagiello/totem"
+    }
+  },
   "navigation": {
     "tabs": [
       {

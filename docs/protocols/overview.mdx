@@ -154,3 +154,51 @@ ESP-IDF's WiFi/BT coexistence arbitrates the radio. The mesh runs on a fixed hom
 channel; a peer whose channel differs is rejected (`Peer channel is not equal to the
 home channel, send fail!`). During a hotspot OTA the device is a WiFi station on the
 phone's channel, and BLE/mesh traffic is suspended for the duration of the download.
+
+
+## Protocol lineage & prior art
+
+Totem's protocol is **not** a single named standard, and it is **not** a novel scheme
+either. It is a **custom application layer assembled on top of standard, open transports**,
+using conventional design patterns rather than anything proprietary or exotic.
+
+### Standard / open building blocks (reused)
+
+| Layer | Component | Origin |
+| --- | --- | --- |
+| BLE host stack | NimBLE (via MicroPython `bluetooth`) | open source (Apache-2.0) |
+| BLE app transport | GATT write/notify pair with custom 128-bit UUIDs | Bluetooth SIG standard; the "serial over GATT" pattern (cf. Nordic UART Service) |
+| Totem-to-Totem radio | ESP-NOW via MicroPython `espnow` / `aioespnow` | Espressif's documented connectionless protocol; `aioespnow` is open source |
+| Cloud / OTA transport | HTTP/1.0 + WebSocket | web standards |
+| Firmware update | ESP-IDF dual-slot OTA + rollback | open source (Espressif) |
+| GNSS | u-blox UBX binary protocol | documented vendor protocol |
+| Geomagnetism | World Magnetic Model 2025 (`WMM_2025`) | public NOAA NCEI / BGS model |
+| Sensor / LED drivers | `neopixel`, `onewire` / `ds18x20` | open-source MicroPython drivers |
+
+### Custom (Totem-authored) layer
+
+- **Wire framing** — a SyncWord (`0xA774`) + `(cat_id, cmd_id)` + `struct.pack`-ed binary
+  payloads. This is the conventional "magic + type + fixed struct" idiom; there is **no
+  serialization library on the air** (no Protobuf, CBOR, msgpack, or JSON — JSON appears
+  only in the HTTP/OTA config, and WebSocket only for the cloud OTA trigger).
+- **Mesh ("Unity Mesh")** — a custom **managed-flooding** design over ESP-NOW broadcast:
+  flood + relay suppression (overhearing / slots) + message-UID dedup + hop limit. The
+  *pattern* is well known (the same family as BLE Mesh's managed flooding); the
+  implementation is Totem's own Python.
+- **Chunked file transfer** — a generic `file_id` / `chunk_no` / resume / ACK / SHA-256
+  scheme, not a named protocol.
+
+### What it is explicitly NOT
+
+The disassembly rules out the usual suspects: **not** Bluetooth **BLE Mesh**; **not**
+Espressif **esp-wifi-mesh** (the SDK's `WIFI_MESH_EVENT` symbols are present but unused);
+**not** Thread, Zigbee, Matter, or 6LoWPAN; **not** painlessMesh; **not** MQTT or CoAP.
+There is also no application-layer cryptography — traffic is cleartext, and the only
+obfuscation is a trivial `rot13` (not encryption).
+
+<Note>
+**In short:** a bespoke command-and-mesh protocol built from standard, open components,
+with a Totem-specific binary message layer on top. A client interoperates by speaking the
+standard transports plus Totem's custom framing — there is no proprietary or exotic
+protocol to reimplement. See [Building a custom client](/reference/building-a-client).
+</Note>

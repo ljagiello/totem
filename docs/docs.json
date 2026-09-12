@@ -67,5 +67,10 @@
     "socials": {
       "github": "https://github.com/ljagiello/totem-compass"
     }
+  },
+  "integrations": {
+    "ga4": {
+      "measurementId": "G-C7CDL770LY"
+    }
   }
 }
